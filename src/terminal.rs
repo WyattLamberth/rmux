@@ -13,12 +13,23 @@ pub struct Terminal {
     parser: vt100::Parser,
     filter: Filter,
 }
+fn nonzero(value: u16) -> std::num::NonZeroU16 {
+    std::num::NonZeroU16::new(value).unwrap_or(std::num::NonZeroU16::MIN)
+}
+
 impl Terminal {
     pub fn new(rows: u16, cols: u16, history: usize) -> Self {
         Self {
-            parser: vt100::Parser::new(rows, cols, history),
+            parser: vt100::Parser::new(nonzero(rows), nonzero(cols), history),
             filter: Filter::Text,
         }
+    }
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        self.parser.set_size(nonzero(rows), nonzero(cols));
+    }
+    pub fn size(&self) -> (u16, u16) {
+        let (rows, cols) = self.parser.screen().size();
+        (rows.get(), cols.get())
     }
     pub fn screen(&self) -> &vt100::Screen {
         self.parser.screen()
@@ -67,5 +78,26 @@ mod tests {
         assert_eq!(terminal.screen().contents(), "beforeafterend");
         terminal.process("界e\u{301}".as_bytes());
         assert!(terminal.screen().contents().contains("界e\u{301}"));
+    }
+    #[test]
+    fn one_row_and_one_column_unicode_wrapping_and_resize_do_not_panic() {
+        for rows in 1..=3 {
+            for cols in 1..=3 {
+                let mut terminal = Terminal::new(rows, cols, 10);
+                for _ in 0..100 {
+                    terminal.process("abc界e\u{301}\r\n\x1b[31mtext\x1b[0m".as_bytes());
+                }
+                terminal.process(b"\x1b[?1049h");
+                terminal.process("abcdef界".as_bytes());
+                terminal.process(b"\x1b[?1049l");
+                terminal.resize(10, 10);
+                terminal.process("more界text".as_bytes());
+                terminal.resize(rows, cols);
+                terminal.process("abcdefgh界".as_bytes());
+                assert_eq!(terminal.size(), (rows, cols));
+                let (row, _) = terminal.screen().cursor_position();
+                assert!(row < rows);
+            }
+        }
     }
 }

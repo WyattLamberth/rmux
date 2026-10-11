@@ -203,7 +203,7 @@ mod tests {
         session.apply(Event::Output(PaneId(1), "right界".as_bytes().to_vec()));
         let mut bytes = Vec::new();
         render(&mut bytes, &session, 21, 5, "test")?;
-        let mut outer = vt100::Parser::new(5, 21, 0);
+        let mut outer = crate::terminal::Terminal::new(5, 21, 0);
         outer.process(&bytes);
         assert!(outer.screen().contents().contains("right界"));
         assert!(outer.screen().contents().contains("rmux pane"));

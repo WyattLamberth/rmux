@@ -119,8 +119,8 @@ impl Session {
             // Hidden panes retain their last real size, so shells never receive 0x0.
             if rect.visible() {
                 if let Some(pane) = self.panes.get_mut(&id) {
-                    if pane.terminal.screen().size() != (rect.rows, rect.cols) {
-                        pane.terminal.screen_mut().set_size(rect.rows, rect.cols);
+                    if pane.terminal.size() != (rect.rows, rect.cols) {
+                        pane.terminal.resize(rect.rows, rect.cols);
                         if pane.lifecycle == Lifecycle::Running {
                             effects.push(Effect::Resize(id, rect));
                         }
@@ -307,7 +307,7 @@ mod tests {
             for rows in 0..4 {
                 s.apply(Event::Resize { cols, rows });
                 for pane in s.panes().values() {
-                    let (r, c) = pane.terminal.screen().size();
+                    let (r, c) = pane.terminal.size();
                     assert!(r > 0 && c > 0);
                 }
             }

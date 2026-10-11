@@ -114,3 +114,17 @@ nixpkgs lock metadata comes from the upstream Nix repository's pinned flake.
 Seeded simulation and CI release gates are tracked in #2 and #4.
 
 Delivery milestones and the Linear setup plan are in [docs/PLAN.md](docs/PLAN.md).
+
+## Performance evidence
+
+Run `cargo bench --locked --bench runtime` for the synthetic release baseline.
+It covers sustained parsing, unsupported strings, 1/4/16-pane rendering and
+resizing, PTY throughput, and spawn/reap/descriptor cleanup. Workloads and
+measured results are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). The baseline
+is local evidence, not a portable CI threshold or real-terminal display speed.
+
+Benchmarking exposed a one-row wrapping panic in vt100 0.16.2. The runtime now
+uses the maintained atuin-vt100 fork with nonzero terminal dimensions, plus
+regression tests for one-row/one-column ASCII, wide/combining text, alternate
+screens and resize. The correctness fix has a measured parsing-throughput cost
+that is recorded explicitly in the benchmark report.

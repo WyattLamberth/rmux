@@ -35,7 +35,7 @@ never invent an assignee or approval.
 The rmux project and four milestones are created. Seven linked issues are
 RMU-5 (GitHub #1), RMU-6 (#2), RMU-7 (#3), RMU-8 (#4), RMU-9 (#5),
 RMU-10 (#6) and RMU-11 (#7). Native priority, milestone and blocking
-relationships are set. Runtime is In Progress pending its PR; the rest remain
+relationships are set. Runtime is In Review in [PR #11](https://github.com/WyattLamberth/rmux/pull/11); the rest remain
 in Backlog. No work is marked Done before merge and acceptance checks.
 
 The owner has requested Scrum principles: use timeboxed Linear cycles as
@@ -46,4 +46,20 @@ not human engineering hours, and scope follows actual agent throughput. Enable n
 project progress; configure Insights dashboards where the workspace plan
 supports them. Never fabricate velocity, historical completion or sprint data.
 
-The [Scrum working agreement](https://linear.app/rmux/document/scrum-working-agreement-and-reporting-52daab5378bb) records sprint events, readiness and Done criteria. Native cycle/chart setup awaits browser sign-in; no completed velocity is claimed.
+The [Scrum working agreement](https://linear.app/rmux/document/scrum-working-agreement-and-reporting-52daab5378bb) records sprint events, readiness and Done criteria. Fibonacci estimates, native cycle/project charts and the workflow board are enabled. Sprint 1 is October 11–12 and Sprint 2 is October 13–14, 2026 (America/Chicago). Shorten future cycles during planning because Linear's recurring scheduler has a one-week minimum. Insights requires Business and dashboards require Enterprise; the workspace is currently Free. No completed velocity is claimed.
+
+## Engineering direction and performance
+
+The owner grants broad creative freedom and welcomes aggressive refactoring.
+Engineering time is not a deciding cost. Quantify results with reproducible
+benchmarks and record throughput, latency, retained memory and resource behavior.
+[GitHub #12](https://github.com/WyattLamberth/rmux/issues/12) /
+[RMU-12](https://linear.app/rmux/issue/RMU-12/benchmark-runtime-throughput-latency-memory-and-refactoring-results)
+tracks the initial benchmark and ongoing regression work. The owner added this
+work during Sprint 1, increasing its scope from 8 to 11 complexity points;
+record the scope change rather than backfilling progress.
+
+Main is protected by the active “Protect main” ruleset: PRs and resolved review
+threads required, force pushes/deletion blocked, no bypass actors, zero required
+approving reviews for this documented AI implementation workflow. CI required
+checks remain part of #4 after their check names exist and pass.

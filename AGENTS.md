@@ -1,5 +1,17 @@
 # Project workflow
 
+The owner grants Codex broad creative freedom for rmux. Make independent
+product, design, architecture, and implementation choices within the owner's
+direction; explore useful improvements and keep decisions concrete and
+reviewable. Do not be afraid of aggressive refactoring when it improves correctness,
+architecture, usability, or performance. Engineering time is not a deciding
+cost under the owner's direction; prefer the stronger result over preserving
+an inferior design to save implementation effort. Benchmark aggressively to
+quantify results: record reproducible workloads, throughput, latency, memory
+and resource behavior where relevant; compare before/after for performance
+claims. Keep measurements honest and limitations explicit. This does not waive
+safety, privacy, validation, or honest provenance.
+
 All implementation is AI-generated under the owner's product direction.
 Use the local Git identity `Codex <codex@openai.com>` for commits. Include a
 `Co-authored-by: Codex <codex@openai.com>` trailer when another author identity
@@ -10,7 +22,8 @@ Use issue-linked branches and pull requests with accurate validation results.
 Also maintain delivery planning in the owner's connected Linear workspace:
 link GitHub issues/PRs, track milestones, priorities, dependencies, and status,
 and mark Done only after merge and required validation. Use Scrum principles:
-sprint goals, refined backlog, Linear cycles, estimates, daily inspection,
+two-day sprints of focused agentic work, sprint goals, refined backlog, Linear
+cycles, complexity estimates (not human-hour estimates), daily inspection,
 sprint reviews and retrospectives; keep native charts backed by actual work.
 See docs/PLAN.md.
 If Linear is not connected, keep the plan current locally until it is available.
