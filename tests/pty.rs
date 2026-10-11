@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn wait_for(pane: &mut Pane, predicate: impl Fn(&Pane) -> bool) {
+fn wait_for(pane: &mut Pane, mut predicate: impl FnMut(&Pane) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         pane.drain().expect("PTY output");
@@ -25,6 +25,14 @@ fn wait_for(pane: &mut Pane, predicate: impl Fn(&Pane) -> bool) {
         );
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+fn background_job_pid(contents: &str) -> Option<u32> {
+    contents
+        .split("JOB_")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("_READY").map(|(pid, _)| pid))
+        .find_map(|pid| pid.parse().ok())
 }
 
 #[test]
@@ -101,13 +109,12 @@ fn close_joins_workers_and_terminates_background_jobs() {
     let mut pane = Pane::spawn(&shell(), 10, 60).unwrap();
     pane.write(b"stty -echo; sleep 60 & printf 'JOB_%s_READY' $!\r")
         .unwrap();
+    let mut job = None;
     wait_for(&mut pane, |pane| {
-        pane.screen().contents().contains("_READY")
+        job = background_job_pid(&pane.screen().contents());
+        job.is_some()
     });
-    let text = pane.screen().contents();
-    let (_, rest) = text.rsplit_once("JOB_").unwrap();
-    let (job, _) = rest.split_once("_READY").unwrap();
-    let job: u32 = job.parse().unwrap();
+    let job = job.expect("shell should print the background job PID");
     let started = Instant::now();
     drop(pane);
     assert!(
