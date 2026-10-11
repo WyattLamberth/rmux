@@ -36,6 +36,16 @@ cargo run --locked -- --shell /bin/bash
 nix run
 ```
 
+Configuration is `$XDG_CONFIG_HOME/rmux/rmux.toml`. A missing file keeps these
+defaults. `rmux --print-default-config` prints them. The file must be owned by
+you and must not be group or world writable.
+
+Persistent sessions are off unless you pass `--persist` or set `server.persist`.
+Detach with `Ctrl-b d`. The server keeps the shells. Run `rmux --persist` again
+to attach to the latest screen. `rmux attach user@host` bootstraps that server
+over SSH. `sync.udp_address` is an optional authenticated datagram path; it
+must not be an unspecified address.
+
 Press `Ctrl-b`, release it, then a command:
 
 | Key | Action |
@@ -45,6 +55,7 @@ Press `Ctrl-b`, release it, then a command:
 | `z` | Zoom focused pane |
 | `PageUp` / `PageDown` | Scroll history up / down |
 | `x` / `q` | Close focused shell / quit all shells; `y` confirms |
+| `d` | Detach, when persistence is enabled |
 | `?` | Help |
 | `Ctrl-b` | Send a literal Ctrl-b to the shell |
 | `Esc` | Cancel prefix |

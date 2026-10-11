@@ -17,11 +17,22 @@ use rmux_core::{PaneId, Session};
 use super::pty::Pane;
 
 /// Render emulated cells, never forward untrusted child escape sequences to the host.
+pub struct Chrome {
+    pub status_fg: Color,
+    pub status_bg: Color,
+    pub pane_fg: Color,
+    pub pane_bg: Color,
+    pub active_fg: Color,
+    pub active_bg: Color,
+    pub top: bool,
+}
+
 pub fn draw(
     session: &Session,
     panes: &BTreeMap<PaneId, Pane>,
     dimensions: (u16, u16),
     status: &str,
+    chrome: &Chrome,
 ) -> io::Result<Vec<u8>> {
     let mut frame = Vec::new();
     queue!(
@@ -47,11 +58,15 @@ pub fn draw(
             MoveTo(rect.x, rect.y),
             SetAttribute(Attribute::Reset),
             SetBackgroundColor(if active {
-                Color::DarkCyan
+                chrome.active_bg
             } else {
-                Color::DarkGrey
+                chrome.pane_bg
             }),
-            SetForegroundColor(Color::White)
+            SetForegroundColor(if active {
+                chrome.active_fg
+            } else {
+                chrome.pane_fg
+            })
         )?;
         let label = format!(
             " {} pane {}{} ",
@@ -110,10 +125,10 @@ pub fn draw(
     if width > 0 && height > 0 {
         queue!(
             frame,
-            MoveTo(0, height - 1),
+            MoveTo(0, if chrome.top { 0 } else { height - 1 }),
             SetAttribute(Attribute::Reset),
-            SetBackgroundColor(Color::DarkBlue),
-            SetForegroundColor(Color::White)
+            SetBackgroundColor(chrome.status_bg),
+            SetForegroundColor(chrome.status_fg)
         )?;
         print_line(&mut frame, status, width)?;
     }

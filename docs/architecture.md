@@ -31,8 +31,9 @@ that every workspace package forbids unsafe code. Rust enforces the unsafe lint.
 
 The current terminal event loop and renderer are concrete adapters, not fully
 simulated ports. Their compatibility and scheduling behavior require adapter
-tests. Server/client transport and virtual-clock abstractions will be introduced
-with persistent sessions rather than added as unused general-purpose layers.
+tests. TOML loading, socket permissions, and SSH live in adapters. The domain
+crate accepts plain limits and a latest-frame sync object; it does not parse
+config or open sockets.
 
 ## Lifecycle and bounds
 

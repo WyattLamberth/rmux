@@ -1,7 +1,11 @@
+mod host;
+mod persist;
+
 use std::{
-    collections::BTreeMap,
     env,
     io::{self, IsTerminal, Write},
+    net::SocketAddr,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -11,48 +15,19 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use crossterm::{
-    event::{self, Event as TerminalEvent, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event as TerminalEvent, KeyCode, KeyEventKind},
     terminal,
 };
 use rmux::adapters::{
+    config::{self, Action, Config, MetricsConfig},
     input::{encode_key, encode_paste},
     metrics::{Metrics, MetricsServer},
-    pty::Pane,
     render,
     terminal::Terminal,
 };
-use rmux_core::{Axis, Controller, Event, PaneHost, PaneId, Rect, Session};
+use rmux_core::{Axis, Controller, Event, Limits, PaneHost, Session};
 
-struct ShellHost {
-    shell: String,
-    panes: BTreeMap<PaneId, Pane>,
-}
-
-impl PaneHost for ShellHost {
-    type Error = anyhow::Error;
-    fn spawn(&mut self, id: PaneId, rows: u16, cols: u16) -> Result<()> {
-        anyhow::ensure!(!self.panes.contains_key(&id), "duplicate pane identifier");
-        let pane = Pane::spawn(&self.shell, rows, cols)?;
-        self.panes.insert(id, pane);
-        Ok(())
-    }
-    fn close(&mut self, id: PaneId) -> Result<()> {
-        self.panes.remove(&id);
-        Ok(())
-    }
-    fn resize(&mut self, id: PaneId, rows: u16, cols: u16) -> Result<()> {
-        self.panes
-            .get_mut(&id)
-            .context("pane is no longer available")?
-            .resize(rows, cols)
-    }
-    fn write(&mut self, id: PaneId, bytes: &[u8]) -> Result<()> {
-        self.panes
-            .get_mut(&id)
-            .context("pane is no longer available")?
-            .write(bytes)
-    }
-}
+use host::{ShellHost, area, chrome};
 
 fn main() {
     if let Err(error) = run() {
@@ -61,41 +36,107 @@ fn main() {
     }
 }
 
-fn run() -> Result<()> {
-    let mut shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let mut args = env::args().skip(1);
-    while let Some(argument) = args.next() {
+struct Args {
+    config: Option<PathBuf>,
+    shell: Option<String>,
+    persist: bool,
+    print_config: bool,
+    print_default: bool,
+    serve: bool,
+    stdio: bool,
+    attach: Option<String>,
+}
+
+fn parse_args() -> Result<Args> {
+    let mut args = Args {
+        config: None,
+        shell: None,
+        persist: false,
+        print_config: false,
+        print_default: false,
+        serve: false,
+        stdio: false,
+        attach: None,
+    };
+    let mut rest = env::args().skip(1);
+    while let Some(argument) = rest.next() {
         match argument.as_str() {
             "--help" | "-h" => {
-                println!(
-                    "rmux {} — AI-built Rust terminal multiplexer\n\nUsage: rmux [--shell PATH]\n\nPrefix: Ctrl-b, then:\n  %       split into columns\n  \"       split into rows\n  o / Tab next pane\n  p       previous pane\n  z       toggle zoom\n  PageUp  scroll up\n  PageDown scroll down\n  x       close focused shell (press y to confirm)\n  q       quit all shells (press y to confirm)\n  ?       show help\n  Ctrl-b  send literal Ctrl-b\n  Esc     cancel prefix or confirmation\n\nMetrics: opt in with RMUX_METRICS_ADDR=127.0.0.1:9464\nPersistent and remote sessions are planned; this build runs attached shells.",
-                    env!("CARGO_PKG_VERSION")
-                );
-                return Ok(());
+                print_help();
+                std::process::exit(0);
             }
             "--version" | "-V" => {
                 println!("rmux {}", env!("CARGO_PKG_VERSION"));
-                return Ok(());
+                std::process::exit(0);
             }
-            "--shell" => shell = args.next().context("--shell requires an executable path")?,
-            _ => bail!("unknown argument {argument:?}; use --help"),
+            "--print-default-config" => args.print_default = true,
+            "--print-config" => args.print_config = true,
+            "--persist" => args.persist = true,
+            "--stdio" => args.stdio = true,
+            "--config" => {
+                args.config = Some(PathBuf::from(
+                    rest.next().context("--config requires a path")?,
+                ));
+            }
+            "--shell" => args.shell = Some(rest.next().context("--shell requires a path")?),
+            "serve" => args.serve = true,
+            "attach" => args.attach = Some(rest.next().unwrap_or_default()),
+            other => bail!("unknown argument {other:?}; use --help"),
         }
     }
+    Ok(args)
+}
+
+fn print_help() {
+    println!(
+        "rmux {} — terminal multiplexer\n\nUsage:\n  rmux [--shell PATH] [--config PATH] [--persist]\n  rmux attach [user@host]\n  rmux serve [--stdio]\n  rmux --print-config\n  rmux --print-default-config\n\nPrefix: Ctrl-b, then % \" o p z x q d ?\nConfig: $XDG_CONFIG_HOME/rmux/rmux.toml",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+fn run() -> Result<()> {
+    let args = parse_args()?;
+    if args.print_default {
+        print!("{}", config::print_default_config());
+        return Ok(());
+    }
+    let mut config = config::load(args.config.as_deref())?;
+    if let Some(shell) = &args.shell {
+        config.session.default_shell = shell.clone();
+    }
+    if args.persist {
+        config.server.persist = true;
+    }
+    if args.print_config {
+        print!("{}", config.summary());
+        return Ok(());
+    }
+    if args.serve {
+        return persist::serve(&config, args.stdio);
+    }
+    if let Some(target) = args.attach {
+        if target.is_empty() {
+            return persist::attach_local(&config);
+        }
+        return persist::attach_ssh(&config, &target);
+    }
+    if config.server.persist {
+        let config_path = args
+            .config
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        return persist::run_persistent(&config, config_path.as_deref(), args.shell.as_deref());
+    }
+    attached(config)
+}
+
+fn attached(config: Config) -> Result<()> {
     anyhow::ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "run rmux in an interactive terminal"
     );
     let metrics = Arc::new(Metrics::default());
-    let _metrics_server = match env::var("RMUX_METRICS_ADDR") {
-        Ok(address) => Some(MetricsServer::start(
-            address
-                .parse()
-                .context("RMUX_METRICS_ADDR must be an IP:port")?,
-            Arc::clone(&metrics),
-        )?),
-        Err(env::VarError::NotPresent) => None,
-        Err(error) => return Err(error).context("read metrics address"),
-    };
+    let _metrics_server = metrics_server(&config, &metrics)?;
     let stopped = Arc::new(AtomicBool::new(false));
     for signal in [
         signal_hook::consts::SIGINT,
@@ -106,17 +147,22 @@ fn run() -> Result<()> {
             .context("register shutdown signals")?;
     }
     let mut dimensions = terminal::size().context("get terminal size")?;
-    let session = Session::new(area(dimensions));
-    let mut host = ShellHost {
-        shell,
-        panes: BTreeMap::new(),
-    };
-    host.spawn(
+    let limits = Limits::new(config.session.max_panes, config.session.write_limit_bytes)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let mut app = Controller::new(
+        Session::with_limits(area(dimensions.0, dimensions.1, config.status.top), limits),
+        ShellHost {
+            shell: config.shell(),
+            command: config.session.default_command.clone(),
+            history_limit: config.session.history_limit,
+            panes: Default::default(),
+        },
+    );
+    app.host.spawn(
         1,
         dimensions.1.saturating_sub(2).max(1),
         dimensions.0.max(1),
     )?;
-    let mut app = Controller::new(session, host);
     let _terminal = Terminal::enter()?;
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |information| {
@@ -125,50 +171,20 @@ fn run() -> Result<()> {
     }));
     let mut prefix = false;
     let mut confirmation = None;
-    let mut status =
-        String::from(" rmux | Ctrl-b ? help | % columns | \" rows | o focus | z zoom ");
+    let mut status = config.status_left();
     let mut dirty = true;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
-    let mut output_cursor = 0;
+    let mut output_cursor = 0usize;
+    let chrome = chrome(&config);
     let mut stdout = io::stdout().lock();
     while !app.host.panes.is_empty() && !stopped.load(Ordering::Relaxed) {
-        let mut ended = Vec::new();
-        let ids: Vec<_> = app.host.panes.keys().copied().collect();
-        let inspected = ids.len().min(16);
-        // At most 256 KiB per tick, rotating across panes instead of favoring low IDs.
-        for offset in 0..inspected {
-            let id = ids[(output_cursor + offset) % ids.len()];
-            let Some(pane) = app.host.panes.get_mut(&id) else {
-                continue;
-            };
-            match pane.drain_budget(4) {
-                Ok(bytes) => {
-                    dirty |= bytes > 0;
-                    metrics.pty_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-                }
-                Err(_) => {
-                    metrics.errors.fetch_add(1, Ordering::Relaxed);
-                    ended.push(id);
-                }
-            }
-            if pane.exited()? {
-                ended.push(id);
-            }
-        }
-        output_cursor = (output_cursor + inspected) % ids.len().max(1);
-        for id in ended {
-            app.dispatch(Event::Close(id));
-            dirty = true;
-        }
-        metrics
-            .panes
-            .store(app.host.panes.len() as u64, Ordering::Relaxed);
+        dirty |= drain(&mut app, &metrics, &mut output_cursor);
         if !app.notices.is_empty() {
             metrics
                 .errors
                 .fetch_add(app.notices.len() as u64, Ordering::Relaxed);
             if let Some(notice) = app.notices.last() {
-                status = format!(" {notice} | Ctrl-b ? help ");
+                status = format!(" {notice} ");
             }
             app.notices.clear();
             dirty = true;
@@ -177,7 +193,7 @@ fn run() -> Result<()> {
             break;
         }
         if dirty && last_frame.elapsed() >= Duration::from_millis(16) {
-            let frame = render::draw(&app.session, &app.host.panes, dimensions, &status)?;
+            let frame = render::draw(&app.session, &app.host.panes, dimensions, &status, &chrome)?;
             stdout.write_all(&frame).context("render terminal")?;
             stdout.flush()?;
             metrics.frames.fetch_add(1, Ordering::Relaxed);
@@ -190,7 +206,7 @@ fn run() -> Result<()> {
         match event::read()? {
             TerminalEvent::Resize(width, height) => {
                 dimensions = (width, height);
-                app.dispatch(Event::Resize(area(dimensions)));
+                app.dispatch(Event::Resize(area(width, height, config.status.top)));
                 dirty = true;
             }
             TerminalEvent::Paste(text) => {
@@ -198,8 +214,8 @@ fn run() -> Result<()> {
                     continue;
                 }
                 if let Some(pane) = app.session.focused().and_then(|id| app.host.panes.get(&id)) {
-                    if text.len() > 65_524 {
-                        status = " Paste exceeds 64 KiB limit; use smaller chunks ".into();
+                    if text.len() > config.session.write_limit_bytes.saturating_sub(12) {
+                        status = " Paste exceeds the write limit ".into();
                     } else {
                         app.dispatch(Event::Write(encode_paste(
                             &text,
@@ -222,32 +238,57 @@ fn run() -> Result<()> {
                             app.dispatch(Event::Close(id));
                         }
                     }
-                    status = " rmux | Ctrl-b ? help ".into();
+                    status = config.status_left();
                     continue;
                 }
                 if prefix {
                     prefix = false;
-                    status = " rmux | Ctrl-b ? help ".into();
-                    match key.code {
-                        KeyCode::Char('%') => app.dispatch(Event::Split(Axis::Columns)),
-                        KeyCode::Char('"') => app.dispatch(Event::Split(Axis::Rows)),
-                        KeyCode::Char('o') | KeyCode::Tab => app.dispatch(Event::FocusNext),
-                        KeyCode::Char('p') | KeyCode::BackTab => app.dispatch(Event::FocusPrevious),
-                        KeyCode::Char('z') => app.dispatch(Event::Zoom),
-                        KeyCode::Char('x') => { confirmation = Some(false); status = " Close focused shell? y confirms; any other key cancels ".into(); }
-                        KeyCode::Char('q') => { confirmation = Some(true); status = " Quit and terminate all shells? y confirms; any other key cancels ".into(); }
-                        KeyCode::Char('?') => status = " Ctrl-b: % columns | \" rows | o next | p previous | z zoom | PgUp/PgDn scroll | x close | q quit ".into(),
-                        KeyCode::PageUp | KeyCode::PageDown => {
-                            if let Some(pane) = app.session.focused().and_then(|id| app.host.panes.get_mut(&id)) { pane.scroll(if key.code == KeyCode::PageUp { 10 } else { -10 }); }
+                    status = config.status_left();
+                    if let Some(action) = config.binding(true, &key).cloned() {
+                        match action {
+                            Action::SplitColumns => app.dispatch(Event::Split(Axis::Columns)),
+                            Action::SplitRows => app.dispatch(Event::Split(Axis::Rows)),
+                            Action::FocusNext => app.dispatch(Event::FocusNext),
+                            Action::FocusPrevious => app.dispatch(Event::FocusPrevious),
+                            Action::Zoom => app.dispatch(Event::Zoom),
+                            Action::ScrollUp | Action::ScrollDown => {
+                                if let Some(pane) = app
+                                    .session
+                                    .focused()
+                                    .and_then(|id| app.host.panes.get_mut(&id))
+                                {
+                                    pane.scroll(if matches!(action, Action::ScrollUp) {
+                                        10
+                                    } else {
+                                        -10
+                                    });
+                                }
+                            }
+                            Action::CloseFocused => {
+                                confirmation = Some(false);
+                                status = " Close focused shell? y confirms ".into();
+                            }
+                            Action::Quit => {
+                                confirmation = Some(true);
+                                status = " Quit and terminate all shells? y confirms ".into();
+                            }
+                            Action::Help => status = config.help_line(),
+                            Action::SendPrefix => app.dispatch(Event::Write(vec![2])),
+                            Action::Cancel => {}
+                            Action::Detach => {
+                                status = " Detach needs --persist or server.persist ".into();
+                            }
+                            Action::RunShell(command) => {
+                                let _ = std::process::Command::new("sh")
+                                    .arg("-c")
+                                    .arg(command)
+                                    .spawn();
+                            }
                         }
-                        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => app.dispatch(Event::Write(vec![2])),
-                        _ => {}
                     }
-                } else if key.code == KeyCode::Char('b')
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                {
+                } else if config.is_prefix(&key) {
                     prefix = true;
-                    status = " Prefix: % columns | \" rows | o next | p previous | z zoom | x close | q quit | Esc cancel ".into();
+                    status = format!(" Prefix {} ", config.prefix_label());
                 } else if let Some(pane) =
                     app.session.focused().and_then(|id| app.host.panes.get(&id))
                 {
@@ -260,16 +301,69 @@ fn run() -> Result<()> {
             _ => {}
         }
     }
-    // Release stdout before guard cleanup re-locks it. ShellHost drops and reaps shells.
     drop(stdout);
     Ok(())
 }
 
-fn area((width, height): (u16, u16)) -> Rect {
-    Rect {
-        x: 0,
-        y: 0,
-        width,
-        height: height.saturating_sub(1),
+fn drain(app: &mut Controller<ShellHost>, metrics: &Metrics, output_cursor: &mut usize) -> bool {
+    let mut dirty = false;
+    let mut ended = Vec::new();
+    let ids: Vec<_> = app.host.panes.keys().copied().collect();
+    if ids.is_empty() {
+        return false;
     }
+    let inspected = ids.len().min(16);
+    for offset in 0..inspected {
+        let id = ids[(*output_cursor + offset) % ids.len()];
+        let Some(pane) = app.host.panes.get_mut(&id) else {
+            continue;
+        };
+        match pane.drain_budget(4) {
+            Ok(bytes) => {
+                dirty |= bytes > 0;
+                metrics.pty_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+            }
+            Err(_) => {
+                metrics.errors.fetch_add(1, Ordering::Relaxed);
+                ended.push(id);
+            }
+        }
+        if pane.exited().unwrap_or(true) {
+            ended.push(id);
+        }
+    }
+    *output_cursor = (*output_cursor + inspected) % ids.len().max(1);
+    for id in ended {
+        app.dispatch(Event::Close(id));
+        dirty = true;
+    }
+    metrics
+        .panes
+        .store(app.host.panes.len() as u64, Ordering::Relaxed);
+    dirty
+}
+
+fn metrics_server(config: &Config, metrics: &Arc<Metrics>) -> Result<Option<MetricsServer>> {
+    if let Ok(value) = env::var("RMUX_METRICS_ADDR") {
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let address: SocketAddr = value
+            .parse()
+            .context("RMUX_METRICS_ADDR must be an IP:port")?;
+        config::check_metrics(&MetricsConfig {
+            enabled: true,
+            address,
+            allow_remote: config.metrics.allow_remote,
+        })?;
+        return Ok(Some(MetricsServer::start(address, Arc::clone(metrics))?));
+    }
+    if !config.metrics.enabled {
+        return Ok(None);
+    }
+    config::check_metrics(&config.metrics)?;
+    Ok(Some(MetricsServer::start(
+        config.metrics.address,
+        Arc::clone(metrics),
+    )?))
 }

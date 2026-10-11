@@ -16,9 +16,11 @@ portable-pty = "0.9"
 signal-hook = "0.3"
 vt100 = "0.16"
 rmux-core = { path = "crates/rmux-core" }
+toml = "1.1.8"
+serde = { version = "1.0.229", features = ["derive"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.28", features = ["fs", "process", "signal"] }
+nix = { version = "0.28", features = ["fs", "process", "signal", "socket", "user"] }
 
 [lints.rust]
 unsafe_code = "forbid"
