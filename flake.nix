@@ -13,7 +13,7 @@
       src = nixpkgs.lib.fileset.toSource {
         root = ./.;
         fileset = nixpkgs.lib.fileset.unions [
-          ./Cargo.toml ./Cargo.lock ./src ./crates ./tests ./examples ./scripts
+          ./Cargo.toml ./Cargo.lock ./src ./crates ./tests ./examples ./scripts ./config
         ];
       };
       packageFor = system:

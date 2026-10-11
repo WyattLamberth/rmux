@@ -1,0 +1,58 @@
+# Owner's tmux controls translated to rmux actions. This is not a tmux parser.
+[session]
+history_limit = 50000
+
+[input]
+prefix = "C-b"
+mouse = true
+escape_time_ms = 0
+repeat_time_ms = 500
+
+# A supplied table replaces the default table, so % and quote are unbound here.
+[keys.prefix]
+"|" = "split-columns"
+"-" = "split-rows"
+h = "focus-left"
+j = "focus-down"
+k = "focus-up"
+l = "focus-right"
+"C-p" = "previous-window"
+"C-n" = "next-window"
+c = "new-window"
+R = "reload"
+o = "focus-next"
+z = "zoom"
+PageUp = "scroll-up"
+PageDown = "scroll-down"
+x = "close-focused"
+q = "quit"
+"?" = "help"
+"C-b" = "send-prefix"
+Esc = "cancel"
+d = "detach"
+
+[pane]
+headers = false
+padding_x = 0
+padding_y = 0
+inherit_cwd = true
+
+[status]
+position = "bottom"
+left = " #S "
+right = " %H:%M %Y-%m-%d "
+left_length = 40
+right_length = 60
+interval_ms = 5000
+message_time_ms = 4000
+
+# Rosé Pine main: https://rosepinetheme.com/palette/
+[style]
+status_fg = "#e0def4"
+status_bg = "#191724"
+pane_fg = "#6e6a86"
+pane_bg = "#191724"
+active_fg = "#191724"
+active_bg = "#c4a7e7"
+message_fg = "#e0def4"
+message_bg = "#26233a"

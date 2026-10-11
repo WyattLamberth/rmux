@@ -8,8 +8,6 @@ use nix::{
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::{
     io::{Read, Write},
-    path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -21,31 +19,27 @@ struct Client {
     child: Box<dyn Child + Send + Sync>,
     screen: vt100::Parser,
     output: Vec<u8>,
-    config_dir: PathBuf,
+    config_path: std::path::PathBuf,
 }
 
 impl Client {
     fn start() -> Self {
-        Self::start_layout(true, 0, false)
+        Self::with_config("[pane]\nheader = true\n")
     }
-
     fn start_layout(headers: bool, padding: u16, top: bool) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let config_dir = std::env::temp_dir().join(format!(
-            "rmux-terminal-{}-{}",
+        Self::with_config(&format!(
+            "[pane]\nheaders = {headers}\npadding = {padding}\n[status]\nposition = \"{}\"\n",
+            if top { "top" } else { "bottom" }
+        ))
+    }
+    fn with_config(config: &str) -> Self {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let config_path = std::env::temp_dir().join(format!(
+            "rmux-terminal-{}-{}.toml",
             std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&config_dir).unwrap();
-        let config_path = config_dir.join("rmux.toml");
-        std::fs::write(
-            &config_path,
-            format!(
-                "[pane]\nheaders = {headers}\npadding = {padding}\n[status]\nposition = \"{}\"\n",
-                if top { "top" } else { "bottom" }
-            ),
-        )
-        .unwrap();
+        std::fs::write(&config_path, config).unwrap();
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -64,7 +58,8 @@ impl Client {
             "--shell",
             &std::env::var("RMUX_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into()),
         ]);
-        command.args(["--config", config_path.to_str().unwrap()]);
+        command.arg("--config");
+        command.arg(&config_path);
         command.env("TERM", "xterm-256color");
         command.env_remove("RMUX_METRICS_ADDR");
         let child = pair.slave.spawn_command(command).unwrap();
@@ -76,7 +71,7 @@ impl Client {
             child,
             screen: vt100::Parser::new(24, 80, 0),
             output: Vec::new(),
-            config_dir,
+            config_path,
         }
     }
     fn read(&mut self) {
@@ -143,10 +138,10 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.config_path);
         if !matches!(self.child.try_wait(), Ok(Some(_))) && self.child.kill().is_ok() {
             let _ = self.child.wait();
         }
-        let _ = std::fs::remove_dir_all(&self.config_dir);
     }
 }
 
@@ -204,6 +199,69 @@ fn sigterm_restores_terminal_and_exits_cleanly() {
 }
 
 #[test]
+fn clean_bottom_bar_splits_cwd_direction_mouse_and_windows() {
+    let mut client = Client::with_config("[input]\nmouse = true\n");
+    client.wait(|c| c.contents().contains("1:shell*"));
+    assert!(
+        !client
+            .screen
+            .screen()
+            .rows(0, 80)
+            .next()
+            .unwrap()
+            .contains("pane 1")
+    );
+    client.send(b"stty -echo; cd /tmp; printf 'READY_'; printf 'ONE\\n'\r");
+    client.wait(|c| c.contents().contains("READY_ONE"));
+    client.send(b"\x02|");
+    client.wait(|c| c.contents().contains("pane 2"));
+    client.send(b"stty -echo; printf 'CWD_'; pwd\r");
+    client.wait(|c| c.contents().contains("CWD_/tmp"));
+    client.send(b"\x02h");
+    client.wait(|c| c.contents().contains("pane 1"));
+    client.send(b"l"); // repeatable directional binding
+    client.wait(|c| c.contents().contains("pane 2"));
+    client.send(b"\x1b[<0;2;2M");
+    client.wait(|c| c.contents().contains("pane 1"));
+    client.send(b"\x02c");
+    client.wait(|c| c.contents().contains("2:shell*"));
+    assert!(!client.contents().contains("READY_ONE"));
+    client.send(b"\x02\x10");
+    client.wait(|c| c.contents().contains("1:shell*") && c.contents().contains("READY_ONE"));
+    client.send(b"\x02\x0e");
+    client.wait(|c| c.contents().contains("2:shell*"));
+    client.send(b"exit\r");
+    client.wait(|c| c.contents().contains("1:shell*") && !c.contents().contains("2:shell"));
+    client.send(b"\x02qy");
+    client.finish();
+}
+
+#[test]
+fn padding_pty_size_and_native_reload_keep_shells_alive() {
+    let mut client = Client::with_config("[pane]\npadding_x = 2\npadding_y = 1\n");
+    client.wait(|c| c.contents().contains("1:shell*"));
+    client.send(b"stty -echo; stty size; printf 'SIZE_'; printf 'READY\\n'\r");
+    client.wait(|c| c.contents().contains("SIZE_READY"));
+    assert!(client.contents().contains("21 76"));
+    std::fs::write(&client.config_path, "[pane]\npadding_x = 99\n").unwrap();
+    client.send(b"\x02R");
+    client.wait(|c| c.contents().contains("Reload failed"));
+    assert!(client.contents().contains("SIZE_READY"));
+    std::fs::write(
+        &client.config_path,
+        "[pane]\nheader = true\npadding_x = 0\npadding_y = 0\n",
+    )
+    .unwrap();
+    client.send(b"\x02R");
+    client.wait(|c| c.contents().contains("Configuration reloaded"));
+    client.send(b"stty size; printf 'AFTER_'; printf 'RELOAD\\n'\r");
+    client.wait(|c| c.contents().contains("AFTER_RELOAD"));
+    assert!(client.contents().contains("22 80"));
+    client.send(b"\x02qy");
+    client.finish();
+}
+
+#[test]
 fn configurable_content_geometry_matches_real_shell_and_cursor() {
     for headers in [false, true] {
         for padding in [0, 1] {
@@ -215,7 +273,16 @@ fn configurable_content_geometry_matches_real_shell_and_cursor() {
                 client.send(b"stty -echo; stty size; printf 'GEOMETRY_'; printf 'READY'\r");
                 client.wait(|client| client.contents().contains("GEOMETRY_READY"));
                 assert!(client.contents().contains(&format!("{rows} {cols}")));
-                assert_eq!(client.contents().contains("pane 1"), headers);
+                assert_eq!(
+                    client
+                        .screen
+                        .screen()
+                        .rows(0, 80)
+                        .nth(usize::from(top))
+                        .unwrap()
+                        .contains("* pane 1"),
+                    headers
+                );
                 // Move to the last content cell: top status must not hide this cursor.
                 client.send(format!("PS1=; printf '\\033[{rows};{cols}H'\r").as_bytes());
                 let expected = (
@@ -237,7 +304,7 @@ fn configurable_content_geometry_matches_real_shell_and_cursor() {
                 client.wait(|client| client.contents().contains("NESTED_READY"));
                 assert!(client.contents().contains(&format!(
                     "{} {}",
-                    12 - u16::from(headers) - padding * 2,
+                    11 - u16::from(headers) - padding * 2,
                     40 - padding * 2
                 )));
                 client.send(b"\x02zstty size; printf 'ZOOM_'; printf 'READY'\r");

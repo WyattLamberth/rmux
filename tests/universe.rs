@@ -187,7 +187,7 @@ fn deterministic_universe() {
                 queued.clear();
                 applied_area = area;
             }
-            let event = match rng.next() % 12 {
+            let event = match rng.next() % 19 {
                 0..=2 => Event::Split(if rng.next() & 1 == 0 {
                     Axis::Rows
                 } else {
@@ -207,6 +207,18 @@ fn deterministic_universe() {
                 7 => Event::Close(c.session.focused().unwrap_or(1)),
                 8 => Event::Spawned(c.host.largest.saturating_add(100)),
                 9 => Event::SpawnFailed(c.host.largest.saturating_add(100)),
+                10 => Event::NewWindow,
+                11 => Event::WindowNext,
+                12 => Event::WindowPrevious,
+                13 => Event::Focus(rmux_core::Direction::Left),
+                14 => Event::Focus(rmux_core::Direction::Right),
+                15 => Event::Focus(rmux_core::Direction::Up),
+                16 => Event::Focus(rmux_core::Direction::Down),
+                17 => Event::Chrome(rmux_core::PaneLayout {
+                    headers: rng.next() & 1 != 0,
+                    padding_x: (rng.next() % 4) as u16,
+                    padding_y: (rng.next() % 4) as u16,
+                }),
                 _ => Event::Write(vec![(rng.next() & 255) as u8; (rng.next() % 4096) as usize]),
             };
             queued.push_back(event);
@@ -303,8 +315,16 @@ fn reference(tree: &Layout, x: u16, y: u16, w: u16, h: u16, out: &mut Vec<(PaneI
                 );
             }
             Axis::Rows => {
-                reference(first, x, y, w, h / 2, out);
-                reference(second, x, y.saturating_add(h / 2), w, h - h / 2, out);
+                let usable = if h == 0 { 0 } else { h - 1 };
+                reference(first, x, y, w, usable / 2, out);
+                reference(
+                    second,
+                    x,
+                    y.saturating_add(usable / 2).saturating_add(1),
+                    w,
+                    usable - usable / 2,
+                    out,
+                );
             }
         },
     }

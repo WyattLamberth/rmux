@@ -20,17 +20,18 @@ use crossterm::{
 };
 use rmux::adapters::{
     config::{self, Action, Config, PredictEcho, SyncMode},
-    input::encode_key,
+    input::{Bindings, Input, encode_key},
     metrics::{Metrics, MetricsServer},
     protocol::{self, ClientMsg, ServerMsg},
     render,
     terminal::Terminal,
 };
 use rmux_core::{
-    Axis, Controller, EchoPrediction, Event, Limits, PaneHost, ScreenSync, Session, SessionKey,
+    Axis, Controller, Direction, EchoPrediction, Event, Limits, PaneHost, ScreenSync, Session,
+    SessionKey,
 };
 
-use crate::host::{ShellHost, area, chrome};
+use crate::host::{self, ShellHost, area, chrome, configure, split};
 
 pub fn run_persistent(
     config: &Config,
@@ -41,7 +42,7 @@ pub fn run_persistent(
         .ok()
         .is_some_and(|path| path.exists())
     {
-        return attach_local(config);
+        return attach_local(config, config_path.map(std::path::Path::new));
     }
     spawn_server(config_path, shell_override)?;
     let started = Instant::now();
@@ -50,20 +51,24 @@ pub fn run_persistent(
             .ok()
             .is_some_and(|path| path.exists())
         {
-            return attach_local(config);
+            return attach_local(config, config_path.map(std::path::Path::new));
         }
         thread::sleep(Duration::from_millis(20));
     }
     bail!("session server did not open a socket")
 }
 
-pub fn attach_local(config: &Config) -> Result<()> {
+pub fn attach_local(config: &Config, config_path: Option<&std::path::Path>) -> Result<()> {
     let stream = connect(config)?;
     let writer = stream.try_clone().context("clone session socket")?;
-    client_loop(config, stream, writer)
+    client_loop(config, config_path, stream, writer)
 }
 
-pub fn attach_ssh(config: &Config, target: &str) -> Result<()> {
+pub fn attach_ssh(
+    config: &Config,
+    target: &str,
+    config_path: Option<&std::path::Path>,
+) -> Result<()> {
     let mut child = Command::new("ssh")
         .args([
             "-T",
@@ -82,47 +87,47 @@ pub fn attach_ssh(config: &Config, target: &str) -> Result<()> {
         .context("start ssh")?;
     let stdin = child.stdin.take().context("ssh stdin")?;
     let stdout = child.stdout.take().context("ssh stdout")?;
-    let result = client_loop(config, stdout, stdin);
+    let result = client_loop(config, config_path, stdout, stdin);
     let _ = child.wait();
     result
 }
 
-pub fn serve(config: &Config, stdio: bool) -> Result<()> {
+pub fn serve(initial: &Config, stdio: bool, config_path: Option<&std::path::Path>) -> Result<()> {
+    let mut config = initial.clone();
     let limits = Limits::new(config.session.max_panes, config.session.write_limit_bytes)
         .map_err(|error| anyhow::anyhow!(error))?;
     let mut dimensions = (80u16, 24u16);
     let mut app = Controller::new(
-        Session::with_options(
-            area(dimensions.0, dimensions.1, config.status.top),
-            limits,
-            config.pane_layout()?,
-        ),
+        Session::with_limits(area(dimensions.0, dimensions.1, config.status.top), limits),
         ShellHost {
             shell: config.shell(),
             command: config.session.default_command.clone(),
             history_limit: config.session.history_limit,
             panes: Default::default(),
+            spawn_dir: None,
         },
     );
-    let content = app
-        .session
-        .content_rect(area(dimensions.0, dimensions.1, config.status.top));
+    let content = config
+        .pane
+        .chrome()
+        .content(area(dimensions.0, dimensions.1, config.status.top));
     app.host
         .spawn(1, content.height.max(1), content.width.max(1))?;
+    configure(&mut app, &config, dimensions);
     let metrics = Arc::new(Metrics::default());
-    let _metrics = start_metrics(config, &metrics)?;
+    let _metrics = start_metrics(&config, &metrics)?;
     let stopped = Arc::new(AtomicBool::new(false));
     for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         let _ = signal_hook::flag::register(signal, Arc::clone(&stopped));
     }
     let key = session_key()?;
-    let udp = bind_udp(config)?;
+    let udp = bind_udp(&config)?;
     let udp_port = udp
         .as_ref()
         .and_then(|socket| socket.local_addr().ok())
         .map(|addr| addr.port())
         .unwrap_or(0);
-    let listener = if stdio { None } else { Some(listen(config)?) };
+    let listener = if stdio { None } else { Some(listen(&config)?) };
     let mut client = if stdio {
         Some(ServerLink::spawn(io::stdin(), io::stdout()))
     } else {
@@ -130,12 +135,32 @@ pub fn serve(config: &Config, stdio: bool) -> Result<()> {
     };
     let mut sync = ScreenSync::default();
     let mut epoch = 1u64;
-    let mut status = config.status_left();
+    let mut status = String::new();
+    let mut message_until = None;
+    let mut status_tick = Instant::now();
     let mut dirty = true;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
     let mut output_cursor = 0usize;
     let mut last_udp = None;
     while !app.host.panes.is_empty() && !stopped.load(Ordering::Relaxed) {
+        if status_tick.elapsed() >= Duration::from_millis(config.status.interval_ms.max(100)) {
+            status_tick = Instant::now();
+            dirty = true;
+        }
+        if message_until.is_some_and(|until| Instant::now() >= until) {
+            status.clear();
+            message_until = None;
+            dirty = true;
+        }
+        if !app.notices.is_empty() {
+            if let Some(notice) = app.notices.last() {
+                status = format!(" {notice} ");
+                message_until =
+                    Some(Instant::now() + Duration::from_millis(config.status.message_time_ms));
+            }
+            app.notices.clear();
+            dirty = true;
+        }
         dirty |= drain(&mut app, &metrics, &mut output_cursor);
         if client.is_none()
             && let Some(listener) = &listener
@@ -152,9 +177,18 @@ pub fn serve(config: &Config, stdio: bool) -> Result<()> {
                 && let Some(msg) = decode_udp(&key, &packet[..len], config.sync.frame_limit_bytes)
             {
                 last_udp = Some(source);
-                if apply_message(&mut app, &msg, &mut dimensions, &mut status, config) {
+                if apply_message(
+                    &mut app,
+                    &msg,
+                    &mut dimensions,
+                    &mut status,
+                    &mut config,
+                    config_path,
+                ) {
                     break;
                 }
+                message_until =
+                    Some(Instant::now() + Duration::from_millis(config.status.message_time_ms));
                 dirty = true;
             }
         }
@@ -173,10 +207,19 @@ pub fn serve(config: &Config, stdio: bool) -> Result<()> {
                         app.dispatch(Event::Detach);
                         let _ = protocol::write_server(&mut link.writer, &ServerMsg::Bye);
                         drop_client = true;
-                    } else if apply_message(&mut app, &msg, &mut dimensions, &mut status, config) {
+                    } else if apply_message(
+                        &mut app,
+                        &msg,
+                        &mut dimensions,
+                        &mut status,
+                        &mut config,
+                        config_path,
+                    ) {
                         let _ = protocol::write_server(&mut link.writer, &ServerMsg::Bye);
                         quit = true;
                     }
+                    message_until =
+                        Some(Instant::now() + Duration::from_millis(config.status.message_time_ms));
                     dirty = true;
                 }
                 Ok(Err(_)) | Err(TryRecvError::Disconnected) => drop_client = true,
@@ -195,7 +238,7 @@ pub fn serve(config: &Config, stdio: bool) -> Result<()> {
                 &app.host.panes,
                 dimensions,
                 &status,
-                &chrome(config),
+                &chrome(&config),
             )
             .context("render frame")?;
             epoch = epoch.saturating_add(1);
@@ -225,7 +268,7 @@ pub fn serve(config: &Config, stdio: bool) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(4));
     }
-    if let Ok(path) = config::socket_path(config) {
+    if let Ok(path) = config::socket_path(&config) {
         let _ = fs::remove_file(path);
     }
     Ok(())
@@ -236,8 +279,21 @@ fn apply_message(
     msg: &ClientMsg,
     dimensions: &mut (u16, u16),
     status: &mut String,
-    config: &Config,
+    config: &mut Config,
+    config_path: Option<&std::path::Path>,
 ) -> bool {
+    if matches!(msg, ClientMsg::Action(21)) {
+        match host::reload(config, config_path) {
+            Ok(next) => {
+                *config = next;
+                configure(app, config, *dimensions);
+                *status = " Configuration reloaded ".into();
+            }
+            Err(error) => *status = format!(" Reload failed: {error:#} "),
+        }
+        return false;
+    }
+    status.clear();
     match msg {
         ClientMsg::Hello { rows, cols } | ClientMsg::Resize { rows, cols } => {
             *dimensions = (*cols, *rows);
@@ -247,6 +303,12 @@ fn apply_message(
         ClientMsg::Action(code) => return apply_code(app, *code, status, config),
         ClientMsg::Detach => app.dispatch(Event::Detach),
         ClientMsg::Quit => return true,
+        ClientMsg::Mouse {
+            column,
+            row,
+            scroll,
+        } if config.input.mouse => host::mouse(app, *column, *row, *scroll),
+        ClientMsg::Mouse { .. } => {}
     }
     false
 }
@@ -258,8 +320,8 @@ fn apply_code(
     config: &Config,
 ) -> bool {
     match code {
-        1 => app.dispatch(Event::Split(Axis::Columns)),
-        2 => app.dispatch(Event::Split(Axis::Rows)),
+        1 => split(app, Event::Split(Axis::Columns), config),
+        2 => split(app, Event::Split(Axis::Rows), config),
         3 => app.dispatch(Event::FocusNext),
         4 => app.dispatch(Event::FocusPrevious),
         5 => app.dispatch(Event::Zoom),
@@ -280,6 +342,13 @@ fn apply_code(
         9 => return true,
         10 => *status = config.help_line(),
         13 => app.dispatch(Event::Detach),
+        14 => app.dispatch(Event::Focus(Direction::Left)),
+        15 => app.dispatch(Event::Focus(Direction::Down)),
+        16 => app.dispatch(Event::Focus(Direction::Up)),
+        17 => app.dispatch(Event::Focus(Direction::Right)),
+        18 => split(app, Event::NewWindow, config),
+        19 => app.dispatch(Event::WindowNext),
+        20 => app.dispatch(Event::WindowPrevious),
         _ => {}
     }
     false
@@ -287,6 +356,7 @@ fn apply_code(
 
 fn client_loop(
     config: &Config,
+    config_path: Option<&std::path::Path>,
     reader: impl Read + Send + 'static,
     mut writer: impl Write + Send + 'static,
 ) -> Result<()> {
@@ -325,10 +395,12 @@ fn client_loop(
         bail!("expected session hello");
     }
     let _terminal = Terminal::enter()?;
+    let mut config = config.clone();
+    Terminal::mouse(config.input.mouse)?;
     let mut echo = EchoPrediction::new(config.sync.prediction_limit_bytes);
     let predict = !matches!(config.sync.predict_echo, PredictEcho::Off)
         && !matches!(config.sync.mode, SyncMode::Off);
-    let mut prefix = false;
+    let mut bindings = Bindings::default();
     let mut confirmation = None;
     let mut stdout = io::stdout().lock();
     loop {
@@ -366,18 +438,22 @@ fn client_loop(
                     }
                     continue;
                 }
-                if prefix {
-                    prefix = false;
-                    if let Some(action) = config.binding(true, &key).cloned()
-                        && dispatch_action(action, &mut writer, &mut confirmation)?
-                    {
-                        break;
+                match bindings.key(&config, &key, Instant::now()) {
+                    Input::Prefix => continue,
+                    Input::Action(action) => {
+                        if matches!(action, Action::Reload) {
+                            // Reload client bindings too. Server owns rendering and PTY configuration.
+                            if let Ok(next) = host::reload(&config, config_path) {
+                                config = next;
+                                Terminal::mouse(config.input.mouse)?;
+                            }
+                        }
+                        if dispatch_action(action, &mut writer, &mut confirmation, &config)? {
+                            break;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                if config.is_prefix(&key) {
-                    prefix = true;
-                    continue;
+                    Input::Shell => {}
                 }
                 let bytes = encode_key(key, false);
                 if predict && !bytes.is_empty() {
@@ -388,9 +464,21 @@ fn client_loop(
                 }
             }
             TerminalEvent::Paste(text)
-                if !prefix && confirmation.is_none() && text.len() <= 65_524 =>
+                if !bindings.prefix && confirmation.is_none() && text.len() <= 65_524 =>
             {
                 protocol::write_client(&mut writer, &ClientMsg::Write(text.into_bytes()))?;
+            }
+            TerminalEvent::Mouse(mouse) if config.input.mouse && confirmation.is_none() => {
+                if let Some(scroll) = host::mouse_scroll(mouse.kind) {
+                    protocol::write_client(
+                        &mut writer,
+                        &ClientMsg::Mouse {
+                            column: mouse.column,
+                            row: mouse.row,
+                            scroll,
+                        },
+                    )?;
+                }
             }
             _ => {}
         }
@@ -402,6 +490,7 @@ fn dispatch_action(
     action: Action,
     writer: &mut impl Write,
     confirmation: &mut Option<bool>,
+    config: &Config,
 ) -> Result<bool> {
     let detach = matches!(action, Action::Detach);
     match action {
@@ -409,7 +498,9 @@ fn dispatch_action(
         Action::Quit => *confirmation = Some(true),
         Action::CloseFocused => *confirmation = Some(false),
         Action::Help => protocol::write_client(writer, &ClientMsg::Action(10))?,
-        Action::SendPrefix => protocol::write_client(writer, &ClientMsg::Write(vec![2]))?,
+        Action::SendPrefix => {
+            protocol::write_client(writer, &ClientMsg::Write(config.prefix_bytes()))?
+        }
         Action::Cancel => {}
         Action::RunShell(command) => {
             let _ = Command::new("sh").arg("-c").arg(command).spawn();

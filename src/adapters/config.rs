@@ -19,13 +19,15 @@ pub const HARD_COMMAND_LEN: usize = 256;
 pub struct Config {
     pub server: ServerConfig,
     pub session: SessionConfig,
-    pub pane: PaneConfig,
     pub input: InputConfig,
     pub keys: Keys,
     pub status: StatusConfig,
     pub style: StyleConfig,
+    pub pane: PaneConfig,
     pub sync: SyncConfig,
     pub metrics: MetricsConfig,
+    pub shell_override: Option<String>,
+    pub persist_override: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,12 +45,6 @@ pub struct SessionConfig {
     pub base_index: u64,
     pub write_limit_bytes: usize,
     pub name: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PaneConfig {
-    pub headers: bool,
-    pub padding: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,6 +68,9 @@ pub struct StatusConfig {
     pub left: String,
     pub right: String,
     pub interval_ms: u64,
+    pub message_time_ms: u64,
+    pub left_length: u16,
+    pub right_length: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +85,22 @@ pub struct StyleConfig {
     pub message_bg: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneConfig {
+    pub headers: bool,
+    pub padding_x: u16,
+    pub padding_y: u16,
+    pub inherit_cwd: bool,
+}
+impl PaneConfig {
+    pub fn chrome(&self) -> rmux_core::PaneLayout {
+        rmux_core::PaneLayout {
+            headers: self.headers,
+            padding_x: self.padding_x,
+            padding_y: self.padding_y,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SyncConfig {
     pub mode: SyncMode,
@@ -128,6 +143,14 @@ pub enum Action {
     SplitRows,
     FocusNext,
     FocusPrevious,
+    FocusLeft,
+    FocusDown,
+    FocusUp,
+    FocusRight,
+    NewWindow,
+    WindowNext,
+    WindowPrevious,
+    Reload,
     Zoom,
     ScrollUp,
     ScrollDown,
@@ -143,6 +166,8 @@ pub enum Action {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            shell_override: None,
+            persist_override: false,
             server: ServerConfig {
                 persist: false,
                 socket: "rmux.sock".into(),
@@ -150,7 +175,7 @@ impl Default for Config {
             session: SessionConfig {
                 default_shell: String::new(),
                 default_command: Vec::new(),
-                history_limit: 2000,
+                history_limit: 50_000,
                 max_panes: 32,
                 base_index: 1,
                 write_limit_bytes: 65_536,
@@ -162,27 +187,35 @@ impl Default for Config {
                     modifiers: KeyModifiers::CONTROL,
                 },
                 prefix2: None,
-                mouse: false,
+                mouse: true,
                 escape_time_ms: 0,
-                repeat_time_ms: 0,
+                repeat_time_ms: 500,
             },
-            pane: PaneConfig::default(),
             keys: default_keys(),
             status: StatusConfig {
                 top: false,
-                left: " rmux ".into(),
-                right: String::new(),
-                interval_ms: 1000,
+                left: " #S ".into(),
+                right: " %H:%M %Y-%m-%d ".into(),
+                interval_ms: 5000,
+                message_time_ms: 4000,
+                left_length: 40,
+                right_length: 60,
             },
             style: StyleConfig {
-                status_fg: "white".into(),
-                status_bg: "darkblue".into(),
-                pane_fg: "white".into(),
-                pane_bg: "darkgrey".into(),
-                active_fg: "white".into(),
-                active_bg: "darkcyan".into(),
-                message_fg: "black".into(),
-                message_bg: "yellow".into(),
+                status_fg: "#e0def4".into(),
+                status_bg: "#191724".into(),
+                pane_fg: "#6e6a86".into(),
+                pane_bg: "#191724".into(),
+                active_fg: "#191724".into(),
+                active_bg: "#c4a7e7".into(),
+                message_fg: "#e0def4".into(),
+                message_bg: "#26233a".into(),
+            },
+            pane: PaneConfig {
+                headers: false,
+                padding_x: 0,
+                padding_y: 0,
+                inherit_cwd: true,
             },
             sync: SyncConfig {
                 mode: SyncMode::Auto,
@@ -219,6 +252,16 @@ fn default_keys() -> Keys {
     bind(&mut prefix, "C-b", Action::SendPrefix);
     bind(&mut prefix, "Esc", Action::Cancel);
     bind(&mut prefix, "d", Action::Detach);
+    bind(&mut prefix, "|", Action::SplitColumns);
+    bind(&mut prefix, "-", Action::SplitRows);
+    bind(&mut prefix, "h", Action::FocusLeft);
+    bind(&mut prefix, "j", Action::FocusDown);
+    bind(&mut prefix, "k", Action::FocusUp);
+    bind(&mut prefix, "l", Action::FocusRight);
+    bind(&mut prefix, "c", Action::NewWindow);
+    bind(&mut prefix, "C-p", Action::WindowPrevious);
+    bind(&mut prefix, "C-n", Action::WindowNext);
+    bind(&mut prefix, "R", Action::Reload);
     Keys {
         prefix,
         root: Vec::new(),
@@ -227,8 +270,11 @@ fn default_keys() -> Keys {
 
 impl Config {
     pub fn pane_layout(&self) -> Result<rmux_core::PaneLayout> {
-        rmux_core::PaneLayout::new(self.pane.headers, self.pane.padding)
-            .map_err(|error| anyhow::anyhow!(error))
+        anyhow::ensure!(
+            self.pane.padding_x <= 32 && self.pane.padding_y <= 32,
+            "pane padding exceeds 32 cells"
+        );
+        Ok(self.pane.chrome())
     }
     pub fn shell(&self) -> String {
         if !self.session.default_shell.is_empty() {
@@ -259,7 +305,17 @@ impl Config {
     }
 
     fn matches(&self, binding: &BindingKey, key: &KeyEvent) -> bool {
-        binding.code == key.code && binding.modifiers == key.modifiers
+        // Terminals disagree about SHIFT on printable symbols. The character already
+        // expresses the shift; retain exact Ctrl/Alt matching.
+        let normalize = |code, modifiers: KeyModifiers| {
+            if matches!(code, KeyCode::Char(_)) {
+                modifiers - KeyModifiers::SHIFT
+            } else {
+                modifiers
+            }
+        };
+        binding.code == key.code
+            && normalize(binding.code, binding.modifiers) == normalize(key.code, key.modifiers)
     }
 
     pub fn prefix_label(&self) -> String {
@@ -277,6 +333,14 @@ impl Config {
                     Action::SplitRows => "rows",
                     Action::FocusNext => "next pane",
                     Action::FocusPrevious => "previous pane",
+                    Action::FocusLeft => "left",
+                    Action::FocusDown => "down",
+                    Action::FocusUp => "up",
+                    Action::FocusRight => "right",
+                    Action::NewWindow => "new window",
+                    Action::WindowNext => "next window",
+                    Action::WindowPrevious => "previous window",
+                    Action::Reload => "reload",
                     Action::Zoom => "zoom",
                     Action::ScrollUp => "scroll up",
                     Action::ScrollDown => "scroll down",
@@ -294,12 +358,27 @@ impl Config {
             .join(" | ");
         format!(" {} : {bindings} ", self.prefix_label())
     }
+    pub fn prefix_bytes(&self) -> Vec<u8> {
+        super::input::encode_key(
+            KeyEvent::new(self.input.prefix.code, self.input.prefix.modifiers),
+            false,
+        )
+    }
+    pub fn repeatable(action: &Action) -> bool {
+        matches!(
+            action,
+            Action::FocusLeft | Action::FocusDown | Action::FocusUp | Action::FocusRight
+        )
+    }
 
     pub fn status_left(&self) -> String {
         expand_status(&self.status.left, &self.session.name)
             .unwrap_or_else(|_| self.status.left.clone())
     }
 
+    pub fn status_right(&self) -> String {
+        expand_status(&self.status.right, &self.session.name).unwrap_or_default()
+    }
     pub fn summary(&self) -> String {
         format!(
             "persist = {}\nprefix = {}\nmax_panes = {}\nhistory_limit = {}\nwrite_limit_bytes = {}\nmetrics = {}\n",
@@ -386,7 +465,6 @@ fn current_uid() -> u32 {
 }
 
 fn validate(config: &Config) -> Result<()> {
-    config.pane_layout()?;
     rmux_core::Limits::new(config.session.max_panes, config.session.write_limit_bytes)
         .map_err(|error| anyhow::anyhow!(error))?;
     if config.session.history_limit > HARD_HISTORY_LIMIT {
@@ -423,6 +501,17 @@ fn validate(config: &Config) -> Result<()> {
     }
     expand_status(&config.status.left, &config.session.name)?;
     expand_status(&config.status.right, &config.session.name)?;
+    if chrono::format::StrftimeItems::new(&config.status_right())
+        .any(|item| matches!(item, chrono::format::Item::Error))
+    {
+        bail!("invalid status.right clock format");
+    }
+    if config.pane.padding_x > 32 || config.pane.padding_y > 32 {
+        bail!("pane padding exceeds 32 cells");
+    }
+    if config.status.message_time_ms > 60_000 {
+        bail!("message time exceeds 60000ms");
+    }
     if config
         .sync
         .udp_address
@@ -462,6 +551,17 @@ fn is_loopback(ip: IpAddr) -> bool {
 
 pub fn named_color(name: &str) -> Result<crossterm::style::Color> {
     use crossterm::style::Color;
+    if let Some(hex) = name.strip_prefix('#') {
+        if hex.len() != 6 || !hex.is_ascii() {
+            bail!("RGB color must be #RRGGBB");
+        }
+        let value = u32::from_str_radix(hex, 16).context("invalid RGB color")?;
+        return Ok(Color::Rgb {
+            r: (value >> 16) as u8,
+            g: (value >> 8) as u8,
+            b: value as u8,
+        });
+    }
     Ok(match name {
         "black" => Color::Black,
         "red" => Color::Red,
@@ -534,7 +634,7 @@ pub fn parse_key(raw: &str) -> Result<BindingKey> {
         other => bail!("unknown key {other}"),
     };
     if modifiers.is_empty() && matches!(code, KeyCode::Char(ch) if ch.is_ascii_uppercase()) {
-        bail!("use S- for shifted letters");
+        modifiers.insert(KeyModifiers::SHIFT);
     }
     Ok(BindingKey { code, modifiers })
 }
@@ -568,6 +668,14 @@ fn parse_action(raw: &str) -> Result<Action> {
         "split-rows" => Action::SplitRows,
         "focus-next" => Action::FocusNext,
         "focus-previous" => Action::FocusPrevious,
+        "focus-left" => Action::FocusLeft,
+        "focus-down" => Action::FocusDown,
+        "focus-up" => Action::FocusUp,
+        "focus-right" => Action::FocusRight,
+        "new-window" => Action::NewWindow,
+        "next-window" => Action::WindowNext,
+        "previous-window" => Action::WindowPrevious,
+        "reload" => Action::Reload,
         "zoom" => Action::Zoom,
         "scroll-up" => Action::ScrollUp,
         "scroll-down" => Action::ScrollDown,
@@ -588,11 +696,11 @@ struct FileConfig {
     include: Option<Vec<String>>,
     server: Option<ServerFile>,
     session: Option<SessionFile>,
-    pane: Option<PaneFile>,
     input: Option<InputFile>,
     keys: Option<KeysFile>,
     status: Option<StatusFile>,
     style: Option<StyleFile>,
+    pane: Option<PaneFile>,
     sync: Option<SyncFile>,
     metrics: Option<MetricsFile>,
 }
@@ -614,13 +722,6 @@ struct SessionFile {
     base_index: Option<u64>,
     write_limit_bytes: Option<usize>,
     name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PaneFile {
-    headers: Option<bool>,
-    padding: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -647,6 +748,9 @@ struct StatusFile {
     left: Option<String>,
     right: Option<String>,
     interval_ms: Option<u64>,
+    message_time_ms: Option<u64>,
+    left_length: Option<u16>,
+    right_length: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -662,6 +766,16 @@ struct StyleFile {
     message_bg: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaneFile {
+    #[serde(alias = "header")]
+    headers: Option<bool>,
+    padding: Option<u16>,
+    padding_x: Option<u16>,
+    padding_y: Option<u16>,
+    inherit_cwd: Option<bool>,
+}
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SyncFile {
@@ -682,14 +796,6 @@ struct MetricsFile {
 
 impl FileConfig {
     fn overlay(self, config: &mut Config) -> Result<()> {
-        if let Some(pane) = self.pane {
-            if let Some(headers) = pane.headers {
-                config.pane.headers = headers;
-            }
-            if let Some(padding) = pane.padding {
-                config.pane.padding = padding;
-            }
-        }
         if let Some(server) = self.server {
             if let Some(persist) = server.persist {
                 config.server.persist = persist;
@@ -772,6 +878,34 @@ impl FileConfig {
             }
             if let Some(interval) = status.interval_ms {
                 config.status.interval_ms = interval;
+            }
+            if let Some(value) = status.message_time_ms {
+                config.status.message_time_ms = value;
+            }
+            if let Some(value) = status.left_length {
+                config.status.left_length = value;
+            }
+            if let Some(value) = status.right_length {
+                config.status.right_length = value;
+            }
+        }
+        if let Some(pane) = self.pane {
+            if let Some(padding) = pane.padding {
+                rmux_core::PaneLayout::new(false, padding).map_err(|e| anyhow::anyhow!(e))?;
+                config.pane.padding_x = padding;
+                config.pane.padding_y = padding;
+            }
+            if let Some(headers) = pane.headers {
+                config.pane.headers = headers;
+            }
+            if let Some(value) = pane.padding_x {
+                config.pane.padding_x = value;
+            }
+            if let Some(value) = pane.padding_y {
+                config.pane.padding_y = value;
+            }
+            if let Some(value) = pane.inherit_cwd {
+                config.pane.inherit_cwd = value;
             }
         }
         if let Some(style) = self.style {
@@ -866,7 +1000,7 @@ pub fn socket_path(config: &Config) -> Result<PathBuf> {
 }
 
 pub fn print_default_config() -> String {
-    r#"# rmux defaults. Missing keys keep these values.
+    r##"# rmux defaults. Missing keys keep these values.
 [server]
 persist = false
 socket = "rmux.sock"
@@ -874,38 +1008,69 @@ socket = "rmux.sock"
 [session]
 default_shell = ""
 default_command = []
-history_limit = 2000
+history_limit = 50000
 max_panes = 32
 base_index = 1
 write_limit_bytes = 65536
 name = "rmux"
 
-[pane]
-headers = false
-padding = 0
-
 [input]
 prefix = "C-b"
 prefix2 = ""
-mouse = false
+mouse = true
 escape_time_ms = 0
-repeat_time_ms = 0
+repeat_time_ms = 500
+
+[keys.prefix]
+"|" = "split-columns"
+"-" = "split-rows"
+"%" = "split-columns"
+'"' = "split-rows"
+h = "focus-left"
+j = "focus-down"
+k = "focus-up"
+l = "focus-right"
+o = "focus-next"
+Tab = "focus-next"
+p = "focus-previous"
+c = "new-window"
+"C-p" = "previous-window"
+"C-n" = "next-window"
+R = "reload"
+z = "zoom"
+PageUp = "scroll-up"
+PageDown = "scroll-down"
+x = "close-focused"
+q = "quit"
+"?" = "help"
+"C-b" = "send-prefix"
+Esc = "cancel"
+d = "detach"
 
 [status]
 position = "bottom"
-left = " rmux "
-right = ""
-interval_ms = 1000
+left = " #S "
+right = " %H:%M %Y-%m-%d "
+interval_ms = 5000
+message_time_ms = 4000
+left_length = 40
+right_length = 60
+
+[pane]
+headers = false
+padding_x = 0
+padding_y = 0
+inherit_cwd = true
 
 [style]
-status_fg = "white"
-status_bg = "darkblue"
-pane_fg = "white"
-pane_bg = "darkgrey"
-active_fg = "white"
-active_bg = "darkcyan"
-message_fg = "black"
-message_bg = "yellow"
+status_fg = "#e0def4"
+status_bg = "#191724"
+pane_fg = "#6e6a86"
+pane_bg = "#191724"
+active_fg = "#191724"
+active_bg = "#c4a7e7"
+message_fg = "#e0def4"
+message_bg = "#26233a"
 
 [sync]
 mode = "auto"
@@ -918,7 +1083,7 @@ udp_address = ""
 enabled = false
 address = "127.0.0.1:9464"
 allow_remote = false
-"#
+"##
     .to_string()
 }
 
@@ -955,30 +1120,6 @@ mod tests {
     }
 
     #[test]
-    fn pane_layout_defaults_round_trip_and_validate() {
-        let mut config = Config::default();
-        let file: FileConfig = toml::from_str(&print_default_config()).unwrap();
-        file.overlay(&mut config).unwrap();
-        validate(&config).unwrap();
-        assert_eq!(config, Config::default());
-        assert!(!config.pane.headers);
-        assert_eq!(config.pane.padding, 0);
-        let file: FileConfig = toml::from_str("[pane]\nheaders = true\npadding = 16\n").unwrap();
-        file.overlay(&mut config).unwrap();
-        validate(&config).unwrap();
-        assert!(config.pane_layout().unwrap().headers);
-        config.pane.padding = 17;
-        assert!(validate(&config).is_err());
-        for text in [
-            "[pane]\npadding = -1",
-            "[pane]\npadding = 65536",
-            "[pane]\nunknown = true",
-        ] {
-            assert!(toml::from_str::<FileConfig>(text).is_err());
-        }
-    }
-
-    #[test]
     fn custom_prefix_binding_dispatches_without_a_terminal() {
         let dir = env::temp_dir().join(format!("rmux-config-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -993,7 +1134,6 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('%'), KeyModifiers::empty());
         assert_eq!(config.binding(true, &key), Some(&Action::SplitColumns));
         assert!(config.is_prefix(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)));
-        assert_eq!(config.help_line(), " Ctrl-a : % columns ");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1023,5 +1163,116 @@ mod tests {
         write_owned(&path, "", 0o600);
         assert!(load_path(&path, 0, &mut Vec::new()).is_ok());
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    #[test]
+    fn default_config_and_owner_preset_roundtrip() {
+        let raw: FileConfig = toml::from_str(&print_default_config()).unwrap();
+        let mut config = Config::default();
+        raw.overlay(&mut config).unwrap();
+        validate(&config).unwrap();
+        let mut defaults = Config::default();
+        assert_eq!(config.keys.prefix.len(), defaults.keys.prefix.len());
+        for (key, action) in &defaults.keys.prefix {
+            assert_eq!(
+                config.binding(true, &KeyEvent::new(key.code, key.modifiers)),
+                Some(action)
+            );
+        }
+        defaults.keys = config.keys.clone(); // Table ordering does not change dispatch.
+        assert_eq!(config, defaults);
+        let raw: FileConfig = toml::from_str(include_str!("../../config/rose-pine.toml")).unwrap();
+        raw.overlay(&mut config).unwrap();
+        validate(&config).unwrap();
+        assert_eq!(config.session.history_limit, 50000);
+        assert!(!config.pane.headers);
+        assert!(config.input.mouse);
+        assert!(
+            config
+                .binding(
+                    true,
+                    &KeyEvent::new(KeyCode::Char('%'), KeyModifiers::SHIFT)
+                )
+                .is_none()
+        );
+        assert_eq!(
+            config.binding(
+                true,
+                &KeyEvent::new(KeyCode::Char('|'), KeyModifiers::SHIFT)
+            ),
+            Some(&Action::SplitColumns)
+        );
+        assert_eq!(
+            config.binding(
+                true,
+                &KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)
+            ),
+            Some(&Action::Reload)
+        );
+    }
+    #[test]
+    fn rgb_padding_and_clock_validation() {
+        assert_eq!(
+            named_color("#191724").unwrap(),
+            crossterm::style::Color::Rgb {
+                r: 25,
+                g: 23,
+                b: 36
+            }
+        );
+        for value in ["#19", "#zzzzzz", "#ééé"] {
+            assert!(named_color(value).is_err());
+        }
+        let mut config = Config::default();
+        config.pane.padding_x = 33;
+        assert!(validate(&config).is_err());
+        config.pane.padding_x = 0;
+        config.status.right = "%Q".into();
+        assert!(validate(&config).is_err());
+        config.status.right = "#S".into();
+        config.session.name = "%Q".into();
+        assert!(validate(&config).is_err());
+    }
+    #[test]
+    fn pane_layout_shorthand_and_header_alias_are_compatible() {
+        let mut config = Config::default();
+        let raw: FileConfig = toml::from_str("[pane]\nheaders = true\npadding = 16\n").unwrap();
+        raw.overlay(&mut config).unwrap();
+        validate(&config).unwrap();
+        assert!(config.pane.headers);
+        assert_eq!(config.pane.padding_x, 16);
+        assert_eq!(config.pane.padding_y, 16);
+        let raw: FileConfig =
+            toml::from_str("[pane]\nheader = false\npadding = 1\npadding_y = 2\n").unwrap();
+        raw.overlay(&mut config).unwrap();
+        validate(&config).unwrap();
+        assert!(!config.pane.headers);
+        assert_eq!(config.pane.padding_x, 1);
+        assert_eq!(config.pane.padding_y, 2);
+        let raw: FileConfig = toml::from_str("[pane]\npadding = 17\n").unwrap();
+        assert!(raw.overlay(&mut config).is_err());
+    }
+    #[test]
+    fn custom_prefix_and_root_bindings_are_honored() {
+        let mut config = Config::default();
+        config.input.prefix = parse_key("C-a").unwrap();
+        assert_eq!(config.prefix_bytes(), [1]);
+        config.keys.root = vec![(parse_key("M-h").unwrap(), Action::FocusLeft)];
+        assert_eq!(
+            config.binding(false, &KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT)),
+            Some(&Action::FocusLeft)
+        );
+        assert!(
+            config
+                .binding(
+                    false,
+                    &KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)
+                )
+                .is_none()
+        );
     }
 }

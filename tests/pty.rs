@@ -173,6 +173,15 @@ fn tiny_configured_viewports_render_without_showing_an_outside_cursor() {
                     active_fg: Color::White,
                     active_bg: Color::Black,
                     top,
+                    headers,
+                    border_fg: Color::White,
+                    active_border_fg: Color::White,
+                    left: "rmux".into(),
+                    right: String::new(),
+                    left_length: 40,
+                    right_length: 60,
+                    message_fg: Color::White,
+                    message_bg: Color::Blue,
                 };
                 for width in 0..5 {
                     for height in 0u16..5 {

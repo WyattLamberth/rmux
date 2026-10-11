@@ -5,7 +5,7 @@ pub mod layout;
 mod session;
 mod sync;
 pub use application::{Controller, PaneHost};
-pub use layout::{Axis, Layout, PaneId, PaneLayout, Rect};
+pub use layout::{Axis, Direction, Layout, PaneId, PaneLayout, Rect};
 pub use session::{Effect, Event, HARD_MAX_PANES, HARD_WRITE_LIMIT, Limits, Session};
 pub use sync::{
     EchoPrediction, HARD_FRAME_LIMIT, HARD_PREDICTION_LIMIT, Observe, PacketFault, ScreenSync,

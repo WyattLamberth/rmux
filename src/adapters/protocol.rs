@@ -10,6 +10,7 @@ pub enum ClientMsg {
     Resize { rows: u16, cols: u16 },
     Detach,
     Quit,
+    Mouse { column: u16, row: u16, scroll: i8 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +90,16 @@ fn encode_client(msg: &ClientMsg) -> io::Result<Vec<u8>> {
         }
         ClientMsg::Detach => body.push(5),
         ClientMsg::Quit => body.push(6),
+        ClientMsg::Mouse {
+            column,
+            row,
+            scroll,
+        } => {
+            body.push(7);
+            body.extend(column.to_be_bytes());
+            body.extend(row.to_be_bytes());
+            body.push(*scroll as u8);
+        }
     }
     Ok(body)
 }
@@ -113,6 +124,11 @@ fn decode_client(body: &[u8]) -> io::Result<ClientMsg> {
         }),
         Some(5) if body.len() == 1 => Ok(ClientMsg::Detach),
         Some(6) if body.len() == 1 => Ok(ClientMsg::Quit),
+        Some(7) if body.len() == 6 && matches!(body[5], 0 | 1 | 255) => Ok(ClientMsg::Mouse {
+            column: u16::from_be_bytes([body[1], body[2]]),
+            row: u16::from_be_bytes([body[3], body[4]]),
+            scroll: body[5] as i8,
+        }),
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, "client message")),
     }
 }
@@ -175,6 +191,14 @@ pub fn action_code(action: &super::config::Action) -> Option<u8> {
         super::config::Action::SendPrefix => 11,
         super::config::Action::Cancel => 12,
         super::config::Action::Detach => 13,
+        super::config::Action::FocusLeft => 14,
+        super::config::Action::FocusDown => 15,
+        super::config::Action::FocusUp => 16,
+        super::config::Action::FocusRight => 17,
+        super::config::Action::NewWindow => 18,
+        super::config::Action::WindowNext => 19,
+        super::config::Action::WindowPrevious => 20,
+        super::config::Action::Reload => 21,
         super::config::Action::RunShell(_) => return None,
     })
 }
@@ -189,6 +213,12 @@ mod tests {
             ClientMsg::Hello { rows: 24, cols: 80 },
             ClientMsg::Write(b"ls\r".to_vec()),
             ClientMsg::Action(13),
+            ClientMsg::Action(21),
+            ClientMsg::Mouse {
+                column: 40,
+                row: 12,
+                scroll: -1,
+            },
             ClientMsg::Resize {
                 rows: 40,
                 cols: 120,

@@ -16,7 +16,7 @@ flowchart LR
 
 ## Boundaries
 
-`crates/rmux-core` owns pane identity, the layout tree, focus, zoom, split
+`crates/rmux-core` owns pane and window identity, layout trees, geometric focus, zoom, split
 transactions, and lifecycle decisions. `Session::apply` maps an event to typed
 effects without IO. `Controller` executes effects through `PaneHost`, translating
 spawn and resize failures back into domain events. A write failure produces a
@@ -40,12 +40,23 @@ config or open sockets.
 A split first reserves a new monotonic identifier. It commits to the layout only
 after the matching shell-start acknowledgement. Failure, cancellation, and stale
 acknowledgements produce cleanup effects. Resize cancels an in-flight split.
-Pane IDs are never reused during a session. The last closed pane ends the session.
+Pane IDs and window IDs are never reused during a session. A typed pending spawn
+represents either a split or a new window. Windows preserve their layout, focus
+and zoom while parked; closing their last pane removes the window. The last
+closed pane across all windows ends the session. Window switching cancels an
+in-flight spawn and emits resize effects for the newly visible panes.
 
-Sessions allow at most 32 panes. Each PTY has bounded output (64 chunks of 4 KiB)
+`PaneChrome` is plain geometry shared by content sizing and rendering. Header
+visibility and padding updates are domain events, and resize failure still uses
+the production close transition. Borders occupy layout gaps. The input adapter
+owns prefix/repeat timing; the status renderer owns wall-clock reads. The Linux
+PTY adapter reads `/proc/<shell-pid>/cwd` for splits without parsing shell titles
+or invoking a shell command.
+
+Sessions allow at most 32 panes across all windows. Each PTY has bounded output (64 chunks of 4 KiB)
 and a 1 MiB input byte queue (plus one 4 KiB worker batch). Input events are at
 most 64 KiB; adjacent keystrokes coalesce without a message-count limit. Per-tick output processing is
-bounded. Terminal history retains at most 2,000 lines per pane. Notice history
+bounded. Terminal history defaults to 50,000 lines per pane (configurable, hard cap 100,000). Notice history
 retains 32 entries. Emulator dimensions clamp to at least 2×2 to avoid known
 wide-character wrapping defects in the dependency; rendering clips to the actual
 viewport. Terminal dimensions also affect memory consumption; explicit
@@ -76,13 +87,15 @@ Shells start with `TERM=xterm-256color`. Child output is parsed into cells; the
 renderer emits its own sequences and does not forward clipboard or title
 controls. The attached Linux adapter currently handles UTF-8 including wide
 characters (viewport clamped to at least 2×2), SGR color and intensity, alternate
-screen, application cursor keys, bracketed paste, and 2,000 lines of scrollback.
+screen, application cursor keys, bracketed paste, and configurable scrollback.
 Primary device attributes (`CSI c`, `ESC Z`), secondary attributes (`CSI > c`),
 device status (`CSI 5 n`), and cursor position reports (`CSI 6 n`) are answered
 only to the originating pane. Replies are dropped once 1,024 bytes are pending
 or the pane input queue is full.
 
-Not supported: mouse tracking, copy mode, clipboard or title forwarding, DECRQM,
+The host mouse adapter supports pane focus and scrollback.
+
+Not supported: application mouse forwarding, copy mode, clipboard or title forwarding, DECRQM,
 XTGETTCAP, XTVERSION, combining-character guarantees, and macOS. Query replies
 are not telemetry.
 
