@@ -111,3 +111,124 @@ mod tests {
         assert_eq!(encode_paste("a\nb", true), b"\x1b[200~a\nb\x1b[201~");
     }
 }
+
+/// Keyboard timing stays in the input adapter; the core receives only actions.
+#[derive(Default)]
+pub struct Bindings {
+    pub prefix: bool,
+    repeat_until: Option<std::time::Instant>,
+}
+pub enum Input {
+    Prefix,
+    Action(super::config::Action),
+    Shell,
+}
+impl Bindings {
+    pub fn key(
+        &mut self,
+        config: &super::config::Config,
+        key: &KeyEvent,
+        now: std::time::Instant,
+    ) -> Input {
+        if config.is_prefix(key) && !self.prefix {
+            self.prefix = true;
+            self.repeat_until = None;
+            return Input::Prefix;
+        }
+        let prefixed = std::mem::take(&mut self.prefix);
+        let repeating = self.repeat_until.is_some_and(|deadline| now < deadline);
+        let action = if prefixed {
+            config.binding(true, key)
+        } else if repeating {
+            config
+                .binding(true, key)
+                .filter(|a| super::config::Config::repeatable(a))
+                .or_else(|| config.binding(false, key))
+        } else {
+            config.binding(false, key)
+        };
+        self.repeat_until = None;
+        if let Some(action) = action {
+            if super::config::Config::repeatable(action) && config.input.repeat_time_ms > 0 {
+                self.repeat_until = now.checked_add(std::time::Duration::from_millis(
+                    config.input.repeat_time_ms,
+                ));
+            }
+            Input::Action(action.clone())
+        } else if prefixed {
+            Input::Action(super::config::Action::Cancel)
+        } else {
+            Input::Shell
+        }
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use crate::adapters::config::{Action, Config};
+    #[test]
+    fn repeated_focus_expires_and_ordinary_typing_exits_repeat_table() {
+        let config = Config::default();
+        let now = std::time::Instant::now();
+        let mut input = Bindings::default();
+        assert!(matches!(
+            input.key(
+                &config,
+                &KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+                now
+            ),
+            Input::Prefix
+        ));
+        assert!(matches!(
+            input.key(
+                &config,
+                &KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+                now
+            ),
+            Input::Action(Action::FocusLeft)
+        ));
+        assert!(matches!(
+            input.key(
+                &config,
+                &KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+                now
+            ),
+            Input::Action(Action::FocusRight)
+        ));
+        assert!(matches!(
+            input.key(
+                &config,
+                &KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+                now + std::time::Duration::from_millis(501)
+            ),
+            Input::Shell
+        ));
+        input.key(
+            &config,
+            &KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            now,
+        );
+        input.key(
+            &config,
+            &KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            now,
+        );
+        assert!(matches!(
+            input.key(
+                &config,
+                &KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                now
+            ),
+            Input::Shell
+        ));
+        assert!(matches!(
+            input.key(
+                &config,
+                &KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+                now
+            ),
+            Input::Shell
+        ));
+    }
+}

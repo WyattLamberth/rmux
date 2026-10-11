@@ -18,6 +18,50 @@ impl Rect {
     }
 }
 
+/// Display geometry shared by PTY sizing and rendering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneChrome {
+    pub header: bool,
+    pub padding_x: u16,
+    pub padding_y: u16,
+}
+impl Default for PaneChrome {
+    fn default() -> Self {
+        Self {
+            header: true,
+            padding_x: 0,
+            padding_y: 0,
+        }
+    }
+}
+impl PaneChrome {
+    pub fn content(self, rect: Rect) -> Rect {
+        let top = u16::from(self.header)
+            .saturating_add(self.padding_y)
+            .min(rect.height);
+        let left = self.padding_x.min(rect.width);
+        Rect {
+            x: rect.x.saturating_add(left),
+            y: rect.y.saturating_add(top),
+            width: rect
+                .width
+                .saturating_sub(left)
+                .saturating_sub(self.padding_x),
+            height: rect
+                .height
+                .saturating_sub(top)
+                .saturating_sub(self.padding_y),
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Down,
+    Up,
+    Right,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Axis {
     Columns,
@@ -111,15 +155,16 @@ pub fn divide(area: Rect, axis: Axis) -> (Rect, Rect) {
             )
         }
         Axis::Rows => {
-            let top = area.height / 2;
+            let available = area.height.saturating_sub(1);
+            let top = available / 2;
             (
                 Rect {
                     height: top,
                     ..area
                 },
                 Rect {
-                    y: area.y.saturating_add(top),
-                    height: area.height - top,
+                    y: area.y.saturating_add(top).saturating_add(1),
+                    height: available - top,
                     ..area
                 },
             )
@@ -150,7 +195,7 @@ mod tests {
                 x: 41,
                 y: 0,
                 width: 40,
-                height: 12
+                height: 11
             }
         );
         assert_eq!(rects[2].1.y, 12);

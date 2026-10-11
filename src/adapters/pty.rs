@@ -42,6 +42,24 @@ impl Pane {
         cols: u16,
         history_limit: usize,
     ) -> Result<Self> {
+        Self::spawn_in(
+            program,
+            args,
+            rows,
+            cols,
+            history_limit,
+            &std::env::current_dir().context("get shell working directory")?,
+        )
+    }
+
+    pub fn spawn_in(
+        program: &str,
+        args: &[String],
+        rows: u16,
+        cols: u16,
+        history_limit: usize,
+        cwd: &std::path::Path,
+    ) -> Result<Self> {
         let rows = rows.max(2);
         // vt100 0.16 requires at least two rows/columns for wrapping wide text.
         let cols = cols.max(2);
@@ -56,7 +74,7 @@ impl Pane {
         for arg in args {
             command.arg(arg);
         }
-        command.cwd(std::env::current_dir().context("get shell working directory")?);
+        command.cwd(cwd);
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         command.env("RMUX", "1");
@@ -165,6 +183,12 @@ impl Pane {
 
     pub fn process_id(&self) -> Option<u32> {
         self.child.process_id()
+    }
+
+    /// Linux reports the shell's current directory without trusting shell escape sequences.
+    pub fn current_dir(&self) -> Option<std::path::PathBuf> {
+        self.process_id()
+            .and_then(|pid| std::fs::read_link(format!("/proc/{pid}/cwd")).ok())
     }
 
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {

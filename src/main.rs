@@ -20,14 +20,14 @@ use crossterm::{
 };
 use rmux::adapters::{
     config::{self, Action, Config, MetricsConfig},
-    input::{encode_key, encode_paste},
+    input::{Bindings, Input, encode_key, encode_paste},
     metrics::{Metrics, MetricsServer},
     render,
     terminal::Terminal,
 };
-use rmux_core::{Axis, Controller, Event, Limits, PaneHost, Session};
+use rmux_core::{Axis, Controller, Direction, Event, Limits, PaneHost, Session};
 
-use host::{ShellHost, area, chrome};
+use host::{ShellHost, area, chrome, configure, split};
 
 fn main() {
     if let Err(error) = run() {
@@ -89,7 +89,7 @@ fn parse_args() -> Result<Args> {
 
 fn print_help() {
     println!(
-        "rmux {} — terminal multiplexer\n\nUsage:\n  rmux [--shell PATH] [--config PATH] [--persist]\n  rmux attach [user@host]\n  rmux serve [--stdio]\n  rmux --print-config\n  rmux --print-default-config\n\nPrefix: Ctrl-b, then % \" o p z x q d ?\nConfig: $XDG_CONFIG_HOME/rmux/rmux.toml",
+        "rmux {} — terminal multiplexer\n\nUsage:\n  rmux [--shell PATH] [--config PATH] [--persist]\n  rmux attach [user@host]\n  rmux serve [--stdio]\n  rmux --print-config\n  rmux --print-default-config\n\nPrefix: Ctrl-b, then | - h j k l c z x q d ?\nConfig: $XDG_CONFIG_HOME/rmux/rmux.toml",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -103,22 +103,24 @@ fn run() -> Result<()> {
     let mut config = config::load(args.config.as_deref())?;
     if let Some(shell) = &args.shell {
         config.session.default_shell = shell.clone();
+        config.shell_override = Some(shell.clone());
     }
     if args.persist {
         config.server.persist = true;
+        config.persist_override = true;
     }
     if args.print_config {
         print!("{}", config.summary());
         return Ok(());
     }
     if args.serve {
-        return persist::serve(&config, args.stdio);
+        return persist::serve(&config, args.stdio, args.config.as_deref());
     }
     if let Some(target) = args.attach {
         if target.is_empty() {
-            return persist::attach_local(&config);
+            return persist::attach_local(&config, args.config.as_deref());
         }
-        return persist::attach_ssh(&config, &target);
+        return persist::attach_ssh(&config, &target, args.config.as_deref());
     }
     if config.server.persist {
         let config_path = args
@@ -127,10 +129,10 @@ fn run() -> Result<()> {
             .map(|path| path.to_string_lossy().into_owned());
         return persist::run_persistent(&config, config_path.as_deref(), args.shell.as_deref());
     }
-    attached(config)
+    attached(config, args.config)
 }
 
-fn attached(config: Config) -> Result<()> {
+fn attached(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
     anyhow::ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "run rmux in an interactive terminal"
@@ -156,28 +158,46 @@ fn attached(config: Config) -> Result<()> {
             command: config.session.default_command.clone(),
             history_limit: config.session.history_limit,
             panes: Default::default(),
+            spawn_dir: None,
         },
     );
-    app.host.spawn(
-        1,
-        dimensions.1.saturating_sub(2).max(1),
-        dimensions.0.max(1),
-    )?;
+    let content = config
+        .pane
+        .chrome()
+        .content(area(dimensions.0, dimensions.1, config.status.top));
+    app.host
+        .spawn(1, content.height.max(1), content.width.max(1))?;
+    configure(&mut app, &config, dimensions);
     let _terminal = Terminal::enter()?;
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |information| {
         rmux::adapters::terminal::restore();
         previous_hook(information);
     }));
-    let mut prefix = false;
+    Terminal::mouse(config.input.mouse)?;
+    let mut bindings = Bindings::default();
     let mut confirmation = None;
-    let mut status = config.status_left();
+    let mut status = String::new();
+    let mut message_until = None;
+    let mut status_tick = Instant::now();
     let mut dirty = true;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
     let mut output_cursor = 0usize;
-    let chrome = chrome(&config);
+    let mut chrome = chrome(&config);
     let mut stdout = io::stdout().lock();
     while !app.host.panes.is_empty() && !stopped.load(Ordering::Relaxed) {
+        if status_tick.elapsed() >= Duration::from_millis(config.status.interval_ms.max(100)) {
+            status_tick = Instant::now();
+            dirty = true;
+        }
+        if message_until.is_some_and(|until| Instant::now() >= until)
+            && confirmation.is_none()
+            && !bindings.prefix
+        {
+            status.clear();
+            message_until = None;
+            dirty = true;
+        }
         dirty |= drain(&mut app, &metrics, &mut output_cursor);
         if !app.notices.is_empty() {
             metrics
@@ -185,6 +205,8 @@ fn attached(config: Config) -> Result<()> {
                 .fetch_add(app.notices.len() as u64, Ordering::Relaxed);
             if let Some(notice) = app.notices.last() {
                 status = format!(" {notice} ");
+                message_until =
+                    Some(Instant::now() + Duration::from_millis(config.status.message_time_ms));
             }
             app.notices.clear();
             dirty = true;
@@ -210,7 +232,7 @@ fn attached(config: Config) -> Result<()> {
                 dirty = true;
             }
             TerminalEvent::Paste(text) => {
-                if confirmation.is_some() || prefix {
+                if confirmation.is_some() || bindings.prefix {
                     continue;
                 }
                 if let Some(pane) = app.session.focused().and_then(|id| app.host.panes.get(&id)) {
@@ -238,16 +260,25 @@ fn attached(config: Config) -> Result<()> {
                             app.dispatch(Event::Close(id));
                         }
                     }
-                    status = config.status_left();
+                    status.clear();
                     continue;
                 }
-                if prefix {
-                    prefix = false;
-                    status = config.status_left();
-                    if let Some(action) = config.binding(true, &key).cloned() {
+                match bindings.key(&config, &key, Instant::now()) {
+                    Input::Prefix => status = format!(" Prefix {} ", config.prefix_label()),
+                    Input::Action(action) => {
+                        status.clear();
                         match action {
-                            Action::SplitColumns => app.dispatch(Event::Split(Axis::Columns)),
-                            Action::SplitRows => app.dispatch(Event::Split(Axis::Rows)),
+                            Action::SplitColumns => {
+                                split(&mut app, Event::Split(Axis::Columns), &config)
+                            }
+                            Action::SplitRows => split(&mut app, Event::Split(Axis::Rows), &config),
+                            Action::NewWindow => split(&mut app, Event::NewWindow, &config),
+                            Action::WindowNext => app.dispatch(Event::WindowNext),
+                            Action::WindowPrevious => app.dispatch(Event::WindowPrevious),
+                            Action::FocusLeft => app.dispatch(Event::Focus(Direction::Left)),
+                            Action::FocusDown => app.dispatch(Event::Focus(Direction::Down)),
+                            Action::FocusUp => app.dispatch(Event::Focus(Direction::Up)),
+                            Action::FocusRight => app.dispatch(Event::Focus(Direction::Right)),
                             Action::FocusNext => app.dispatch(Event::FocusNext),
                             Action::FocusPrevious => app.dispatch(Event::FocusPrevious),
                             Action::Zoom => app.dispatch(Event::Zoom),
@@ -264,6 +295,16 @@ fn attached(config: Config) -> Result<()> {
                                     });
                                 }
                             }
+                            Action::Reload => match host::reload(&config, config_path.as_deref()) {
+                                Ok(next) => {
+                                    config = next;
+                                    configure(&mut app, &config, dimensions);
+                                    chrome = host::chrome(&config);
+                                    Terminal::mouse(config.input.mouse)?;
+                                    status = " Configuration reloaded ".into();
+                                }
+                                Err(error) => status = format!(" Reload failed: {error:#} "),
+                            },
                             Action::CloseFocused => {
                                 confirmation = Some(false);
                                 status = " Close focused shell? y confirms ".into();
@@ -273,10 +314,10 @@ fn attached(config: Config) -> Result<()> {
                                 status = " Quit and terminate all shells? y confirms ".into();
                             }
                             Action::Help => status = config.help_line(),
-                            Action::SendPrefix => app.dispatch(Event::Write(vec![2])),
+                            Action::SendPrefix => app.dispatch(Event::Write(config.prefix_bytes())),
                             Action::Cancel => {}
                             Action::Detach => {
-                                status = " Detach needs --persist or server.persist ".into();
+                                status = " Detach needs --persist or server.persist ".into()
                             }
                             Action::RunShell(command) => {
                                 let _ = std::process::Command::new("sh")
@@ -285,17 +326,30 @@ fn attached(config: Config) -> Result<()> {
                                     .spawn();
                             }
                         }
+                        if !status.is_empty() {
+                            message_until = Some(
+                                Instant::now()
+                                    + Duration::from_millis(config.status.message_time_ms),
+                            );
+                        }
                     }
-                } else if config.is_prefix(&key) {
-                    prefix = true;
-                    status = format!(" Prefix {} ", config.prefix_label());
-                } else if let Some(pane) =
-                    app.session.focused().and_then(|id| app.host.panes.get(&id))
-                {
-                    let bytes = encode_key(key, pane.screen().application_cursor());
-                    if !bytes.is_empty() {
-                        app.dispatch(Event::Write(bytes));
+                    Input::Shell => {
+                        if let Some(pane) =
+                            app.session.focused().and_then(|id| app.host.panes.get(&id))
+                        {
+                            status.clear();
+                            let bytes = encode_key(key, pane.screen().application_cursor());
+                            if !bytes.is_empty() {
+                                app.dispatch(Event::Write(bytes));
+                            }
+                        }
                     }
+                }
+            }
+            TerminalEvent::Mouse(mouse) if config.input.mouse && confirmation.is_none() => {
+                if let Some(scroll) = host::mouse_scroll(mouse.kind) {
+                    host::mouse(&mut app, mouse.column, mouse.row, scroll);
+                    dirty = true;
                 }
             }
             _ => {}

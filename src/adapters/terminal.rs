@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use anyhow::{Context, Result};
 use crossterm::{
     cursor::{Hide, Show},
-    event::{DisableBracketedPaste, EnableBracketedPaste},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     style::{Attribute, ResetColor, SetAttribute},
     terminal::{
@@ -15,6 +15,15 @@ use crossterm::{
 pub struct Terminal;
 
 impl Terminal {
+    pub fn mouse(enabled: bool) -> Result<()> {
+        if enabled {
+            execute!(io::stdout(), EnableMouseCapture)?;
+        } else {
+            execute!(io::stdout(), DisableMouseCapture)?;
+        }
+        Ok(())
+    }
+
     pub fn enter() -> Result<Self> {
         enable_raw_mode().context("enable terminal raw mode")?;
         let guard = Self;
@@ -43,6 +52,7 @@ pub fn restore() {
         ResetColor,
         Show,
         DisableBracketedPaste,
+        DisableMouseCapture,
         LeaveAlternateScreen
     );
     let _ = io::stdout().flush();

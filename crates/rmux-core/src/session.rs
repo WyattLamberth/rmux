@@ -1,4 +1,5 @@
-use crate::{Axis, Layout, PaneId, Rect};
+use crate::{Axis, Direction, Layout, PaneChrome, PaneId, Rect};
+use std::collections::BTreeMap;
 
 pub const MAX_PANES: usize = 32;
 pub const HARD_MAX_PANES: usize = MAX_PANES;
@@ -46,6 +47,12 @@ pub enum Event {
     Detach,
     FocusNext,
     FocusPrevious,
+    Focus(Direction),
+    FocusPane(PaneId),
+    NewWindow,
+    WindowNext,
+    WindowPrevious,
+    Chrome(PaneChrome),
     Zoom,
     Resize(Rect),
     Write(Vec<u8>),
@@ -61,8 +68,26 @@ pub enum Effect {
 #[derive(Debug)]
 struct Pending {
     id: PaneId,
-    target: PaneId,
-    axis: Axis,
+    layout: SpawnLayout,
+}
+#[derive(Debug)]
+enum SpawnLayout {
+    Split { target: PaneId, axis: Axis },
+    Window { source: PaneId },
+}
+impl Pending {
+    fn source(&self) -> PaneId {
+        match self.layout {
+            SpawnLayout::Split { target, .. } => target,
+            SpawnLayout::Window { source } => source,
+        }
+    }
+}
+#[derive(Debug)]
+struct Window {
+    layout: Layout,
+    focus: PaneId,
+    zoomed: bool,
 }
 #[derive(Debug)]
 pub struct Session {
@@ -73,6 +98,10 @@ pub struct Session {
     next_id: PaneId,
     pending: Option<Pending>,
     limits: Limits,
+    chrome: PaneChrome,
+    parked: BTreeMap<u64, Window>,
+    active_window: u64,
+    next_window: u64,
 }
 impl Session {
     /// The adapter must create pane 1 before constructing the session.
@@ -89,12 +118,16 @@ impl Session {
             next_id: 2,
             pending: None,
             limits,
+            chrome: PaneChrome::default(),
+            parked: BTreeMap::new(),
+            active_window: 1,
+            next_window: 2,
         }
     }
     pub fn focused(&self) -> Option<PaneId> {
         self.focus
     }
-    pub fn pane_ids(&self) -> Vec<PaneId> {
+    fn active_ids(&self) -> Vec<PaneId> {
         self.layout
             .as_ref()
             .map(|l| {
@@ -105,6 +138,111 @@ impl Session {
             })
             .unwrap_or_default()
     }
+    pub fn pane_ids(&self) -> Vec<PaneId> {
+        let mut ids = self.active_ids();
+        for window in self.parked.values() {
+            ids.extend(
+                window
+                    .layout
+                    .rectangles(Rect::default())
+                    .into_iter()
+                    .map(|(id, _)| id),
+            );
+        }
+        ids
+    }
+    pub fn window_ids(&self) -> Vec<u64> {
+        let mut ids: Vec<_> = self.parked.keys().copied().collect();
+        if self.layout.is_some() {
+            ids.push(self.active_window);
+        }
+        ids.sort_unstable();
+        ids
+    }
+    pub fn active_window(&self) -> u64 {
+        self.active_window
+    }
+    pub fn content(&self, rect: Rect) -> Rect {
+        self.chrome.content(rect)
+    }
+    fn fits(&self, rect: Rect) -> bool {
+        let content = self.content(rect);
+        content.width >= MIN_WIDTH && content.height >= MIN_HEIGHT
+    }
+    fn switch_window(&mut self, id: u64) {
+        if let Some(next) = self.parked.remove(&id) {
+            if let (Some(layout), Some(focus)) = (self.layout.take(), self.focus) {
+                self.parked.insert(
+                    self.active_window,
+                    Window {
+                        layout,
+                        focus,
+                        zoomed: self.zoomed,
+                    },
+                );
+            }
+            self.layout = Some(next.layout);
+            self.focus = Some(next.focus);
+            self.zoomed = next.zoomed;
+            self.active_window = id;
+        }
+    }
+    fn focus_direction(&mut self, direction: Direction) {
+        let Some(layout) = &self.layout else {
+            return;
+        };
+        let rects = layout.rectangles(self.area);
+        let Some((_, from)) = rects.iter().find(|(id, _)| Some(*id) == self.focus) else {
+            return;
+        };
+        let center = |r: &Rect| {
+            (
+                i32::from(r.x) * 2 + i32::from(r.width),
+                i32::from(r.y) * 2 + i32::from(r.height),
+            )
+        };
+        let (fx, fy) = center(from);
+        let candidate = rects
+            .iter()
+            .filter_map(|(id, r)| {
+                if Some(*id) == self.focus {
+                    return None;
+                }
+                let (x, y) = center(r);
+                let (ahead, cross, overlap) = match direction {
+                    Direction::Left => (
+                        fx - x,
+                        (fy - y).abs(),
+                        r.y < from.y.saturating_add(from.height)
+                            && from.y < r.y.saturating_add(r.height),
+                    ),
+                    Direction::Right => (
+                        x - fx,
+                        (fy - y).abs(),
+                        r.y < from.y.saturating_add(from.height)
+                            && from.y < r.y.saturating_add(r.height),
+                    ),
+                    Direction::Up => (
+                        fy - y,
+                        (fx - x).abs(),
+                        r.x < from.x.saturating_add(from.width)
+                            && from.x < r.x.saturating_add(r.width),
+                    ),
+                    Direction::Down => (
+                        y - fy,
+                        (fx - x).abs(),
+                        r.x < from.x.saturating_add(from.width)
+                            && from.x < r.x.saturating_add(r.width),
+                    ),
+                };
+                (ahead > 0 && overlap).then_some(((ahead, cross, *id), *id))
+            })
+            .min_by_key(|(score, _)| *score)
+            .map(|(_, id)| id);
+        if let Some(id) = candidate {
+            self.focus = Some(id);
+        }
+    }
     pub fn is_zoomed(&self) -> bool {
         self.zoomed
     }
@@ -113,7 +251,7 @@ impl Session {
             return Vec::new();
         };
         let rects = layout.rectangles(self.area);
-        if self.zoomed || rects.iter().any(|(_, r)| !fits(*r)) {
+        if self.zoomed || rects.iter().any(|(_, r)| !self.fits(*r)) {
             return self
                 .focus
                 .map(|id| vec![(id, self.area)])
@@ -125,7 +263,7 @@ impl Session {
         self.rectangles()
             .into_iter()
             .map(|(id, rect)| {
-                let content = rect.content();
+                let content = self.content(rect);
                 Effect::Resize {
                     id,
                     rows: content.height.max(1),
@@ -161,15 +299,18 @@ impl Session {
                 };
                 proposed.split(target, id, axis);
                 let rects = proposed.rectangles(self.area);
-                if rects.iter().any(|(_, r)| !fits(*r)) {
+                if rects.iter().any(|(_, r)| !self.fits(*r)) {
                     return vec![Effect::Notice("Terminal is too small to split".into())];
                 }
                 let Some((_, rect)) = rects.iter().find(|(pane, _)| *pane == id) else {
                     return effects;
                 };
-                let content = rect.content();
+                let content = self.content(*rect);
                 self.next_id = next;
-                self.pending = Some(Pending { id, target, axis });
+                self.pending = Some(Pending {
+                    id,
+                    layout: SpawnLayout::Split { target, axis },
+                });
                 effects.push(Effect::Spawn {
                     id,
                     rows: content.height,
@@ -181,8 +322,27 @@ impl Session {
                     let Some(p) = self.pending.take() else {
                         return effects;
                     };
-                    if let Some(layout) = &mut self.layout {
-                        if layout.split(p.target, id, p.axis) {
+                    if matches!(p.layout, SpawnLayout::Window { .. }) {
+                        if let (Some(layout), Some(focus)) = (self.layout.take(), self.focus) {
+                            self.parked.insert(
+                                self.active_window,
+                                Window {
+                                    layout,
+                                    focus,
+                                    zoomed: self.zoomed,
+                                },
+                            );
+                        }
+                        self.layout = Some(Layout::Pane(id));
+                        self.focus = Some(id);
+                        self.zoomed = false;
+                        self.active_window = self.next_window;
+                        self.next_window = self.next_window.saturating_add(1);
+                        effects.extend(self.sizes());
+                    } else if let SpawnLayout::Split { target, axis } = p.layout
+                        && let Some(layout) = &mut self.layout
+                    {
+                        if layout.split(target, id, axis) {
                             self.focus = Some(id);
                             self.zoomed = false;
                             effects.extend(self.sizes());
@@ -210,24 +370,57 @@ impl Session {
                 if self
                     .pending
                     .as_ref()
-                    .is_some_and(|p| p.id == id || p.target == id)
+                    .is_some_and(|p| p.id == id || p.source() == id)
                 {
                     self.cancel(&mut effects);
                 }
-                if self.pane_ids().contains(&id) {
+                if let Some(window_id) = self.parked.iter().find_map(|(wid, w)| {
+                    w.layout
+                        .rectangles(Rect::default())
+                        .iter()
+                        .any(|(pane, _)| *pane == id)
+                        .then_some(*wid)
+                }) {
+                    if let Some(window) = self.parked.remove(&window_id)
+                        && let Some(layout) = window.layout.remove(id)
+                    {
+                        let focus = if window.focus == id {
+                            let Some((first, _)) =
+                                layout.rectangles(Rect::default()).first().copied()
+                            else {
+                                return effects;
+                            };
+                            first
+                        } else {
+                            window.focus
+                        };
+                        self.parked.insert(
+                            window_id,
+                            Window {
+                                layout,
+                                focus,
+                                zoomed: window.zoomed,
+                            },
+                        );
+                    }
+                    effects.push(Effect::Close { id });
+                } else if self.active_ids().contains(&id) {
                     self.layout = self.layout.take().and_then(|l| l.remove(id));
                     if self.focus == Some(id) {
-                        self.focus = self.pane_ids().first().copied();
+                        self.focus = self.active_ids().first().copied();
                     }
                     if self.layout.is_none() {
                         self.zoomed = false;
+                        if let Some(next) = self.parked.keys().next().copied() {
+                            self.switch_window(next);
+                        }
                     }
                     effects.push(Effect::Close { id });
                     effects.extend(self.sizes());
                 }
             }
             Event::FocusNext | Event::FocusPrevious => {
-                let ids = self.pane_ids();
+                let ids = self.active_ids();
                 if let Some(index) = ids.iter().position(|id| Some(*id) == self.focus) {
                     let next = if event == Event::FocusNext {
                         (index + 1) % ids.len()
@@ -235,6 +428,63 @@ impl Session {
                         (index + ids.len() - 1) % ids.len()
                     };
                     self.focus = Some(ids[next]);
+                    effects.extend(self.sizes());
+                }
+            }
+            Event::Focus(direction) => {
+                self.focus_direction(direction);
+                effects.extend(self.sizes());
+            }
+            Event::FocusPane(id) => {
+                if self.active_ids().contains(&id) {
+                    self.focus = Some(id);
+                    effects.extend(self.sizes());
+                }
+            }
+            Event::Chrome(chrome) => {
+                self.cancel(&mut effects);
+                self.chrome = chrome;
+                effects.extend(self.sizes());
+            }
+            Event::NewWindow => {
+                if self.pending.is_some() {
+                    return vec![Effect::Notice("A spawn is already pending".into())];
+                }
+                if self.pane_ids().len() >= self.limits.max_panes {
+                    return vec![Effect::Notice("Pane limit reached".into())];
+                }
+                let Some(target) = self.focus else {
+                    return effects;
+                };
+                let id = self.next_id;
+                let Some(next) = id.checked_add(1) else {
+                    return vec![Effect::Notice("Pane identifiers exhausted".into())];
+                };
+                if self.next_window == u64::MAX {
+                    return vec![Effect::Notice("Window identifiers exhausted".into())];
+                }
+                let content = self.content(self.area);
+                self.next_id = next;
+                self.pending = Some(Pending {
+                    id,
+                    layout: SpawnLayout::Window { source: target },
+                });
+                effects.push(Effect::Spawn {
+                    id,
+                    rows: content.height.max(1),
+                    cols: content.width.max(1),
+                });
+            }
+            Event::WindowNext | Event::WindowPrevious => {
+                self.cancel(&mut effects);
+                let ids = self.window_ids();
+                if let Some(index) = ids.iter().position(|id| *id == self.active_window) {
+                    let next = if event == Event::WindowNext {
+                        (index + 1) % ids.len()
+                    } else {
+                        (index + ids.len() - 1) % ids.len()
+                    };
+                    self.switch_window(ids[next]);
                     effects.extend(self.sizes());
                 }
             }
@@ -262,9 +512,6 @@ impl Session {
         }
         effects
     }
-}
-fn fits(rect: Rect) -> bool {
-    rect.width >= MIN_WIDTH && rect.height >= MIN_HEIGHT
 }
 
 #[cfg(test)]
@@ -361,5 +608,119 @@ mod tests {
             s.apply(Event::Split(Axis::Rows))[0],
             Effect::Notice(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    fn start() -> Session {
+        Session::new(Rect {
+            width: 81,
+            height: 24,
+            ..Rect::default()
+        })
+    }
+    fn spawn(s: &mut Session, event: Event) -> PaneId {
+        let effects = s.apply(event);
+        let Effect::Spawn { id, .. } = effects[0] else {
+            panic!("expected spawn {effects:?}");
+        };
+        s.apply(Event::Spawned(id));
+        id
+    }
+    #[test]
+    fn directional_focus_uses_geometry_and_does_not_wrap() {
+        let mut s = start();
+        let right = spawn(&mut s, Event::Split(Axis::Columns));
+        let down = spawn(&mut s, Event::Split(Axis::Rows));
+        s.apply(Event::Focus(Direction::Up));
+        assert_eq!(s.focused(), Some(right));
+        s.apply(Event::Focus(Direction::Left));
+        assert_eq!(s.focused(), Some(1));
+        s.apply(Event::Focus(Direction::Left));
+        assert_eq!(s.focused(), Some(1));
+        s.apply(Event::Focus(Direction::Right));
+        assert_eq!(s.focused(), Some(down)); // Closest pane to the full-height pane's center.
+        s.apply(Event::Focus(Direction::Up));
+        assert_eq!(s.focused(), Some(right));
+        s.apply(Event::Focus(Direction::Down));
+        assert_eq!(s.focused(), Some(down));
+        s.apply(Event::Zoom);
+        s.apply(Event::Focus(Direction::Left));
+        assert_eq!(s.focused(), Some(1));
+        assert_eq!(s.rectangles().len(), 1);
+    }
+    #[test]
+    fn windows_preserve_focus_layout_and_close_inactive_resources() {
+        let mut s = start();
+        let right = spawn(&mut s, Event::Split(Axis::Columns));
+        let other = spawn(&mut s, Event::NewWindow);
+        assert_eq!(s.window_ids(), vec![1, 2]);
+        assert_eq!(s.pane_ids().len(), 3);
+        assert_eq!(s.rectangles().len(), 1);
+        s.apply(Event::WindowPrevious);
+        assert_eq!(s.focused(), Some(right));
+        assert_eq!(s.rectangles().len(), 2);
+        assert!(
+            s.apply(Event::Close(other))
+                .contains(&Effect::Close { id: other })
+        );
+        assert_eq!(s.window_ids(), vec![1]);
+        let other = spawn(&mut s, Event::NewWindow);
+        s.apply(Event::Close(other));
+        assert_eq!(s.focused(), Some(right));
+        assert_eq!(s.rectangles().len(), 2);
+    }
+    #[test]
+    fn failed_window_spawn_and_cancel_do_not_hide_original_window() {
+        let mut s = start();
+        let Effect::Spawn { id, .. } = s.apply(Event::NewWindow)[0] else {
+            panic!();
+        };
+        s.apply(Event::SpawnFailed(id));
+        assert_eq!(s.window_ids(), vec![1]);
+        assert_eq!(s.focused(), Some(1));
+        let Effect::Spawn { id, .. } = s.apply(Event::NewWindow)[0] else {
+            panic!();
+        };
+        let effects = s.apply(Event::WindowNext);
+        assert!(effects.contains(&Effect::Close { id }));
+        assert_eq!(s.apply(Event::Spawned(id)), vec![Effect::Close { id }]);
+    }
+    #[test]
+    fn chrome_resize_effects_match_content_and_tiny_sizes_stay_bounded() {
+        let mut s = start();
+        let chrome = PaneChrome {
+            header: false,
+            padding_x: 2,
+            padding_y: 1,
+        };
+        assert_eq!(
+            s.apply(Event::Chrome(chrome)),
+            vec![Effect::Resize {
+                id: 1,
+                rows: 22,
+                cols: 77
+            }]
+        );
+        for width in 0..5 {
+            for height in 0..5 {
+                let effects = s.apply(Event::Resize(Rect {
+                    width,
+                    height,
+                    ..Rect::default()
+                }));
+                assert!(
+                    effects
+                        .iter()
+                        .all(|e| matches!(e,Effect::Resize {rows,cols,..} if *rows>=1 && *cols>=1))
+                );
+                let rect = s.rectangles()[0].1;
+                let content = s.content(rect);
+                assert!(content.width <= width && content.height <= height);
+                assert!(content.x <= width && content.y <= height);
+            }
+        }
     }
 }
