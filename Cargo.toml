@@ -20,7 +20,7 @@ toml = "1.1.8"
 serde = { version = "1.0.229", features = ["derive"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.28", features = ["fs", "process", "signal", "socket", "user"] }
+nix = { version = "0.31", features = ["fs", "process", "signal", "socket", "user"] }
 
 [lints.rust]
 unsafe_code = "forbid"
