@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use super::buffer::InputQueue;
 use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -20,7 +21,7 @@ enum Output {
 
 pub struct Pane {
     master: Box<dyn MasterPty + Send>,
-    input: SyncSender<Vec<u8>>,
+    input: Arc<InputQueue>,
     child: Box<dyn Child + Send + Sync>,
     output: Receiver<Output>,
     parser: vt100::Parser<QueryReplies>,
@@ -53,7 +54,8 @@ impl Pane {
         drop(pair.slave);
         // At most 256 KiB of pending output per pane; a noisy process gets backpressure.
         let (sender, output) = mpsc::sync_channel(64);
-        let (input, input_receiver) = mpsc::sync_channel::<Vec<u8>>(16);
+        let input = Arc::new(InputQueue::default());
+        let input_writer = Arc::clone(&input);
         let stop = Arc::new(AtomicBool::new(false));
         let mut pane = Self {
             master: pair.master,
@@ -71,15 +73,19 @@ impl Pane {
             .name("rmux-pty-writer".into())
             .spawn(move || {
                 while !writer_stop.load(Ordering::Relaxed) {
-                    let bytes = match input_receiver.recv_timeout(Duration::from_millis(5)) {
-                        Ok(bytes) => bytes,
-                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    let bytes = match input_writer.take() {
+                        Ok(Some(bytes)) => bytes,
+                        Ok(None) => break,
+                        Err(error) => {
+                            send_output(&input_errors, Output::Error(error), &writer_stop);
+                            break;
+                        }
                     };
                     let mut remaining = bytes.as_slice();
                     while !remaining.is_empty() && !writer_stop.load(Ordering::Relaxed) {
                         match writer.write(remaining) {
                             Ok(0) => {
+                                input_writer.close();
                                 send_output(
                                     &input_errors,
                                     Output::Error(io::ErrorKind::WriteZero.into()),
@@ -93,6 +99,7 @@ impl Pane {
                                 thread::sleep(Duration::from_millis(2))
                             }
                             Err(error) => {
+                                input_writer.close();
                                 send_output(&input_errors, Output::Error(error), &writer_stop);
                                 return;
                             }
@@ -145,11 +152,9 @@ impl Pane {
     pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
         self.parser.screen_mut().set_scrollback(0);
         anyhow::ensure!(bytes.len() <= 65_536, "input exceeds 64 KiB limit");
-        match self.input.try_send(bytes.to_vec()) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(anyhow::anyhow!("pane input queue is full")),
-            Err(TrySendError::Disconnected(_)) => Err(anyhow::anyhow!("pane input writer closed")),
-        }
+        self.input
+            .try_send(bytes.to_vec())
+            .context("queue pane input")
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
@@ -275,6 +280,7 @@ impl vt100::Callbacks for QueryReplies {
 impl Drop for Pane {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        self.input.close();
         terminate_session(self.child.as_ref());
         if !matches!(self.child.try_wait(), Ok(Some(_))) && self.child.kill().is_ok() {
             let _ = self.child.wait();

@@ -42,7 +42,8 @@ acknowledgements produce cleanup effects. Resize cancels an in-flight split.
 Pane IDs are never reused during a session. The last closed pane ends the session.
 
 Sessions allow at most 32 panes. Each PTY has bounded output (64 chunks of 4 KiB)
-and input (16 messages of at most 64 KiB) queues. Per-tick output processing is
+and a 1 MiB input byte queue (plus one 4 KiB worker batch). Input events are at
+most 64 KiB; adjacent keystrokes coalesce without a message-count limit. Per-tick output processing is
 bounded. Terminal history retains at most 2,000 lines per pane. Notice history
 retains 32 entries. Emulator dimensions clamp to at least 2×2 to avoid known
 wide-character wrapping defects in the dependency; rendering clips to the actual
