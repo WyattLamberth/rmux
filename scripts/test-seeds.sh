@@ -8,6 +8,9 @@ valid_u64() {
   [[ $digits =~ ^[0-9]+$ ]] || return 1
   digits=${digits#"${digits%%[!0]*}"}
   digits=${digits:-0}
+  # Equal-length decimal strings compare lexically; Bash arithmetic is signed
+  # and cannot safely represent the complete u64 seed range.
+  # shellcheck disable=SC2071
   [[ ${#digits} -lt 20 || ( ${#digits} -eq 20 && ! $digits > 18446744073709551615 ) ]]
 }
 steps=${RMUX_TEST_STEPS:-2000}

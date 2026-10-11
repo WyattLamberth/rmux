@@ -44,7 +44,9 @@ Pane IDs are never reused during a session. The last closed pane ends the sessio
 Sessions allow at most 32 panes. Each PTY has bounded output (64 chunks of 4 KiB)
 and input (16 messages of at most 64 KiB) queues. Per-tick output processing is
 bounded. Terminal history retains at most 2,000 lines per pane. Notice history
-retains 32 entries. Terminal dimensions also affect memory consumption; explicit
+retains 32 entries. Emulator dimensions clamp to at least 2×2 to avoid known
+wide-character wrapping defects in the dependency; rendering clips to the actual
+viewport. Terminal dimensions also affect memory consumption; explicit
 screen-memory budgets remain a hardening task. A tiny viewport temporarily shows
 only the focused pane, preserving the logical tree.
 
