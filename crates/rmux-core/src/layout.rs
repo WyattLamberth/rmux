@@ -9,20 +9,11 @@ pub struct Rect {
 }
 
 /// Display geometry shared by PTY sizing and rendering.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PaneLayout {
     pub headers: bool,
     pub padding_x: u16,
     pub padding_y: u16,
-}
-impl Default for PaneLayout {
-    fn default() -> Self {
-        Self {
-            headers: false,
-            padding_x: 0,
-            padding_y: 0,
-        }
-    }
 }
 impl PaneLayout {
     pub fn new(headers: bool, padding: u16) -> Result<Self, &'static str> {
