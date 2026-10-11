@@ -8,6 +8,8 @@ use nix::{
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::{
     io::{Read, Write},
+    path::PathBuf,
+    sync::atomic::{AtomicUsize, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -19,10 +21,31 @@ struct Client {
     child: Box<dyn Child + Send + Sync>,
     screen: vt100::Parser,
     output: Vec<u8>,
+    config_dir: PathBuf,
 }
 
 impl Client {
     fn start() -> Self {
+        Self::start_layout(true, 0, false)
+    }
+
+    fn start_layout(headers: bool, padding: u16, top: bool) -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let config_dir = std::env::temp_dir().join(format!(
+            "rmux-terminal-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_path = config_dir.join("rmux.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "[pane]\nheaders = {headers}\npadding = {padding}\n[status]\nposition = \"{}\"\n",
+                if top { "top" } else { "bottom" }
+            ),
+        )
+        .unwrap();
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -41,6 +64,7 @@ impl Client {
             "--shell",
             &std::env::var("RMUX_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into()),
         ]);
+        command.args(["--config", config_path.to_str().unwrap()]);
         command.env("TERM", "xterm-256color");
         command.env_remove("RMUX_METRICS_ADDR");
         let child = pair.slave.spawn_command(command).unwrap();
@@ -52,6 +76,7 @@ impl Client {
             child,
             screen: vt100::Parser::new(24, 80, 0),
             output: Vec::new(),
+            config_dir,
         }
     }
     fn read(&mut self) {
@@ -121,6 +146,7 @@ impl Drop for Client {
         if !matches!(self.child.try_wait(), Ok(Some(_))) && self.child.kill().is_ok() {
             let _ = self.child.wait();
         }
+        let _ = std::fs::remove_dir_all(&self.config_dir);
     }
 }
 
@@ -175,4 +201,83 @@ fn sigterm_restores_terminal_and_exits_cleanly() {
     let pid = client.child.process_id().unwrap();
     kill(Pid::from_raw(pid.try_into().unwrap()), Signal::SIGTERM).unwrap();
     client.finish();
+}
+
+#[test]
+fn configurable_content_geometry_matches_real_shell_and_cursor() {
+    for headers in [false, true] {
+        for padding in [0, 1] {
+            for top in [false, true] {
+                let mut client = Client::start_layout(headers, padding, top);
+                client.wait(|client| client.contents().contains("rmux"));
+                let rows = 23 - u16::from(headers) - padding * 2;
+                let cols = 80 - padding * 2;
+                client.send(b"stty -echo; stty size; printf 'GEOMETRY_'; printf 'READY'\r");
+                client.wait(|client| client.contents().contains("GEOMETRY_READY"));
+                assert!(client.contents().contains(&format!("{rows} {cols}")));
+                assert_eq!(client.contents().contains("pane 1"), headers);
+                // Move to the last content cell: top status must not hide this cursor.
+                client.send(format!("PS1=; printf '\\033[{rows};{cols}H'\r").as_bytes());
+                let expected = (
+                    u16::from(top) + u16::from(headers) + padding + rows - 1,
+                    padding + cols - 1,
+                );
+                client.wait(|client| {
+                    client.screen.screen().cursor_position() == expected
+                        && !client.screen.screen().hide_cursor()
+                });
+                client.send(b"\x02%stty size; printf 'COLUMN_'; printf 'READY'\r");
+                client.wait(|client| client.contents().contains("COLUMN_READY"));
+                assert!(
+                    client
+                        .contents()
+                        .contains(&format!("{rows} {}", 40 - padding * 2))
+                );
+                client.send(b"\x02\"stty -echo; stty size; printf 'NESTED_'; printf 'READY'\r");
+                client.wait(|client| client.contents().contains("NESTED_READY"));
+                assert!(client.contents().contains(&format!(
+                    "{} {}",
+                    12 - u16::from(headers) - padding * 2,
+                    40 - padding * 2
+                )));
+                client.send(b"\x02zstty size; printf 'ZOOM_'; printf 'READY'\r");
+                client.wait(|client| client.contents().contains("ZOOM_READY"));
+                assert!(client.contents().contains(&format!("{rows} {cols}")));
+                client
+                    ._master
+                    .resize(PtySize {
+                        rows: 18,
+                        cols: 50,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .unwrap();
+                client.screen.screen_mut().set_size(18, 50);
+                let resized_rows = 17 - u16::from(headers) - padding * 2;
+                let resized_cols = 50 - padding * 2;
+                // Query the real shell until the adapter has propagated the outer size.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    client.send(b"stty size\r");
+                    client.read();
+                    if client
+                        .contents()
+                        .contains(&format!("{resized_rows} {resized_cols}"))
+                    {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "inner PTY did not resize: headers={headers} padding={padding} top={top}, screen={:?}",
+                        client.contents()
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                client.send(b"\x02q");
+                client.wait(|client| client.contents().contains("Quit and terminate"));
+                client.send(b"y");
+                client.finish();
+            }
+        }
+    }
 }

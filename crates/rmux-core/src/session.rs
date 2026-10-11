@@ -1,4 +1,4 @@
-use crate::{Axis, Layout, PaneId, Rect};
+use crate::{Axis, Layout, PaneId, PaneLayout, Rect};
 
 pub const MAX_PANES: usize = 32;
 pub const HARD_MAX_PANES: usize = MAX_PANES;
@@ -73,6 +73,7 @@ pub struct Session {
     next_id: PaneId,
     pending: Option<Pending>,
     limits: Limits,
+    pane_layout: PaneLayout,
 }
 impl Session {
     /// The adapter must create pane 1 before constructing the session.
@@ -81,6 +82,10 @@ impl Session {
     }
 
     pub fn with_limits(area: Rect, limits: Limits) -> Self {
+        Self::with_options(area, limits, PaneLayout::default())
+    }
+
+    pub fn with_options(area: Rect, limits: Limits, pane_layout: PaneLayout) -> Self {
         Self {
             layout: Some(Layout::Pane(1)),
             area,
@@ -89,10 +94,21 @@ impl Session {
             next_id: 2,
             pending: None,
             limits,
+            pane_layout,
         }
     }
     pub fn focused(&self) -> Option<PaneId> {
         self.focus
+    }
+    pub fn pane_layout(&self) -> PaneLayout {
+        self.pane_layout
+    }
+    pub fn content_rect(&self, rect: Rect) -> Rect {
+        self.pane_layout.content(rect)
+    }
+    fn fits(&self, rect: Rect) -> bool {
+        let content = self.content_rect(rect);
+        content.width >= MIN_WIDTH && content.height >= MIN_HEIGHT
     }
     pub fn pane_ids(&self) -> Vec<PaneId> {
         self.layout
@@ -113,7 +129,7 @@ impl Session {
             return Vec::new();
         };
         let rects = layout.rectangles(self.area);
-        if self.zoomed || rects.iter().any(|(_, r)| !fits(*r)) {
+        if self.zoomed || rects.iter().any(|(_, r)| !self.fits(*r)) {
             return self
                 .focus
                 .map(|id| vec![(id, self.area)])
@@ -125,7 +141,7 @@ impl Session {
         self.rectangles()
             .into_iter()
             .map(|(id, rect)| {
-                let content = rect.content();
+                let content = self.content_rect(rect);
                 Effect::Resize {
                     id,
                     rows: content.height.max(1),
@@ -161,13 +177,13 @@ impl Session {
                 };
                 proposed.split(target, id, axis);
                 let rects = proposed.rectangles(self.area);
-                if rects.iter().any(|(_, r)| !fits(*r)) {
+                if rects.iter().any(|(_, r)| !self.fits(*r)) {
                     return vec![Effect::Notice("Terminal is too small to split".into())];
                 }
                 let Some((_, rect)) = rects.iter().find(|(pane, _)| *pane == id) else {
                     return effects;
                 };
-                let content = rect.content();
+                let content = self.content_rect(*rect);
                 self.next_id = next;
                 self.pending = Some(Pending { id, target, axis });
                 effects.push(Effect::Spawn {
@@ -263,9 +279,6 @@ impl Session {
         effects
     }
 }
-fn fits(rect: Rect) -> bool {
-    rect.width >= MIN_WIDTH && rect.height >= MIN_HEIGHT
-}
 
 #[cfg(test)]
 mod tests {
@@ -275,6 +288,62 @@ mod tests {
             width: 160,
             height: 80,
             ..Rect::default()
+        }
+    }
+    #[test]
+    fn configured_content_sizes_follow_nested_splits_zoom_and_resize() {
+        for headers in [false, true] {
+            for padding in [0, 1, 16] {
+                let pane_layout = PaneLayout::new(headers, padding).unwrap();
+                let mut s = Session::with_options(area(), Limits::default(), pane_layout);
+                for axis in [Axis::Columns, Axis::Rows] {
+                    let spawn = s.apply(Event::Split(axis));
+                    if let Some(Effect::Spawn { id, rows, cols }) = spawn.first() {
+                        let (id, rows, cols) = (*id, *rows, *cols);
+                        let sizes = s.apply(Event::Spawned(id));
+                        let rect = s
+                            .rectangles()
+                            .into_iter()
+                            .find(|(pane, _)| *pane == id)
+                            .unwrap()
+                            .1;
+                        let content = s.content_rect(rect);
+                        assert_eq!((rows, cols), (content.height, content.width));
+                        assert!(sizes.contains(&Effect::Resize { id, rows, cols }));
+                    }
+                }
+                for event in [Event::Zoom, Event::Zoom, Event::FocusPrevious] {
+                    let effects = s.apply(event);
+                    for (id, rect) in s.rectangles() {
+                        let content = s.content_rect(rect);
+                        assert!(effects.contains(&Effect::Resize {
+                            id,
+                            rows: content.height.max(1),
+                            cols: content.width.max(1),
+                        }));
+                    }
+                }
+                for width in 0..8 {
+                    for height in 0..8 {
+                        let effects = s.apply(Event::Resize(Rect {
+                            width,
+                            height,
+                            ..Rect::default()
+                        }));
+                        for (id, rect) in s.rectangles() {
+                            let content = s.content_rect(rect);
+                            assert!(content.x <= width && content.y <= height);
+                            assert!(content.x + content.width <= width);
+                            assert!(content.y + content.height <= height);
+                            assert!(effects.contains(&Effect::Resize {
+                                id,
+                                rows: content.height.max(1),
+                                cols: content.width.max(1),
+                            }));
+                        }
+                    }
+                }
+            }
         }
     }
     fn spawn_id(effects: &[Effect]) -> PaneId {

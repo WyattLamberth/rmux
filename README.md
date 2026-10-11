@@ -40,6 +40,22 @@ Configuration is `$XDG_CONFIG_HOME/rmux/rmux.toml`. A missing file keeps these
 defaults. `rmux --print-default-config` prints them. The file must be owned by
 you and must not be group or world writable.
 
+Pane headers are hidden by default, with zero padding and a bottom status bar.
+To restore headers or add space around shell content, configure:
+
+```toml
+[pane]
+headers = true
+padding = 1
+```
+
+Padding accepts 0–16 cells on each side, below the optional header. Split, zoom,
+resize, PTY dimensions and cursor placement use that same content area. A small
+terminal temporarily shows only the focused pane; an empty content area hides
+the cursor. The terminal emulator still uses a minimum 2×2 screen and clips it
+to the available area. Padding defaults to zero; no tmux configuration import
+is provided.
+
 Persistent sessions are off unless you pass `--persist` or set `server.persist`.
 Detach with `Ctrl-b d`. The server keeps the shells. Run `rmux --persist` again
 to attach to the latest screen. `rmux attach user@host` bootstraps that server

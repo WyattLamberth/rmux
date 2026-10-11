@@ -150,7 +150,11 @@ fn attached(config: Config) -> Result<()> {
     let limits = Limits::new(config.session.max_panes, config.session.write_limit_bytes)
         .map_err(|error| anyhow::anyhow!(error))?;
     let mut app = Controller::new(
-        Session::with_limits(area(dimensions.0, dimensions.1, config.status.top), limits),
+        Session::with_options(
+            area(dimensions.0, dimensions.1, config.status.top),
+            limits,
+            config.pane_layout()?,
+        ),
         ShellHost {
             shell: config.shell(),
             command: config.session.default_command.clone(),
@@ -158,11 +162,11 @@ fn attached(config: Config) -> Result<()> {
             panes: Default::default(),
         },
     );
-    app.host.spawn(
-        1,
-        dimensions.1.saturating_sub(2).max(1),
-        dimensions.0.max(1),
-    )?;
+    let content = app
+        .session
+        .content_rect(area(dimensions.0, dimensions.1, config.status.top));
+    app.host
+        .spawn(1, content.height.max(1), content.width.max(1))?;
     let _terminal = Terminal::enter()?;
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |information| {
@@ -174,10 +178,22 @@ fn attached(config: Config) -> Result<()> {
     let mut status = config.status_left();
     let mut dirty = true;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
+    let mut last_size_check = Instant::now();
     let mut output_cursor = 0usize;
     let chrome = chrome(&config);
     let mut stdout = io::stdout().lock();
     while !app.host.panes.is_empty() && !stopped.load(Ordering::Relaxed) {
+        // Resize notifications can be delayed behind queued input or coalesced.
+        // Sample the adapter's actual size at a bounded rate as well.
+        if last_size_check.elapsed() >= Duration::from_millis(250) {
+            let current = terminal::size().context("get terminal size")?;
+            if current != dimensions {
+                dimensions = current;
+                app.dispatch(Event::Resize(area(current.0, current.1, config.status.top)));
+                dirty = true;
+            }
+            last_size_check = Instant::now();
+        }
         dirty |= drain(&mut app, &metrics, &mut output_cursor);
         if !app.notices.is_empty() {
             metrics
