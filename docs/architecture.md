@@ -60,8 +60,12 @@ bounded. Terminal history defaults to 50,000 lines per pane (configurable, hard 
 retains 32 entries. Emulator dimensions clamp to at least 2×2 to avoid known
 wide-character wrapping defects in the dependency; rendering clips to the actual
 viewport. Terminal dimensions also affect memory consumption; explicit
-screen-memory budgets remain a hardening task. A tiny viewport temporarily shows
-only the focused pane, preserving the logical tree.
+screen-memory budgets remain a hardening task. Pane headers default to hidden;
+configurable 0–16 cell padding defaults to zero. The domain's `PaneLayout`
+computes content geometry for initial spawn, split admission, resize, rendering
+and cursor placement. Splits require at least 2×2 content cells per pane. A tiny
+viewport temporarily shows only the focused pane, preserving the logical tree;
+zero content area hides the cursor.
 
 ## Deterministic testing
 

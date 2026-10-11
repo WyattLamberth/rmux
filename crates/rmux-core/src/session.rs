@@ -1,4 +1,4 @@
-use crate::{Axis, Direction, Layout, PaneChrome, PaneId, Rect};
+use crate::{Axis, Direction, Layout, PaneId, PaneLayout, Rect};
 use std::collections::BTreeMap;
 
 pub const MAX_PANES: usize = 32;
@@ -52,7 +52,7 @@ pub enum Event {
     NewWindow,
     WindowNext,
     WindowPrevious,
-    Chrome(PaneChrome),
+    Chrome(PaneLayout),
     Zoom,
     Resize(Rect),
     Write(Vec<u8>),
@@ -98,7 +98,7 @@ pub struct Session {
     next_id: PaneId,
     pending: Option<Pending>,
     limits: Limits,
-    chrome: PaneChrome,
+    chrome: PaneLayout,
     parked: BTreeMap<u64, Window>,
     active_window: u64,
     next_window: u64,
@@ -110,6 +110,9 @@ impl Session {
     }
 
     pub fn with_limits(area: Rect, limits: Limits) -> Self {
+        Self::with_options(area, limits, PaneLayout::default())
+    }
+    pub fn with_options(area: Rect, limits: Limits, chrome: PaneLayout) -> Self {
         Self {
             layout: Some(Layout::Pane(1)),
             area,
@@ -118,7 +121,7 @@ impl Session {
             next_id: 2,
             pending: None,
             limits,
-            chrome: PaneChrome::default(),
+            chrome,
             parked: BTreeMap::new(),
             active_window: 1,
             next_window: 2,
@@ -164,6 +167,12 @@ impl Session {
     }
     pub fn content(&self, rect: Rect) -> Rect {
         self.chrome.content(rect)
+    }
+    pub fn pane_layout(&self) -> PaneLayout {
+        self.chrome
+    }
+    pub fn content_rect(&self, rect: Rect) -> Rect {
+        self.content(rect)
     }
     fn fits(&self, rect: Rect) -> bool {
         let content = self.content(rect);
@@ -524,6 +533,62 @@ mod tests {
             ..Rect::default()
         }
     }
+    #[test]
+    fn configured_content_sizes_follow_nested_splits_zoom_and_resize() {
+        for headers in [false, true] {
+            for padding in [0, 1, 16] {
+                let pane_layout = PaneLayout::new(headers, padding).unwrap();
+                let mut s = Session::with_options(area(), Limits::default(), pane_layout);
+                for axis in [Axis::Columns, Axis::Rows] {
+                    let spawn = s.apply(Event::Split(axis));
+                    if let Some(Effect::Spawn { id, rows, cols }) = spawn.first() {
+                        let (id, rows, cols) = (*id, *rows, *cols);
+                        let sizes = s.apply(Event::Spawned(id));
+                        let rect = s
+                            .rectangles()
+                            .into_iter()
+                            .find(|(pane, _)| *pane == id)
+                            .unwrap()
+                            .1;
+                        let content = s.content_rect(rect);
+                        assert_eq!((rows, cols), (content.height, content.width));
+                        assert!(sizes.contains(&Effect::Resize { id, rows, cols }));
+                    }
+                }
+                for event in [Event::Zoom, Event::Zoom, Event::FocusPrevious] {
+                    let effects = s.apply(event);
+                    for (id, rect) in s.rectangles() {
+                        let content = s.content_rect(rect);
+                        assert!(effects.contains(&Effect::Resize {
+                            id,
+                            rows: content.height.max(1),
+                            cols: content.width.max(1),
+                        }));
+                    }
+                }
+                for width in 0..8 {
+                    for height in 0..8 {
+                        let effects = s.apply(Event::Resize(Rect {
+                            width,
+                            height,
+                            ..Rect::default()
+                        }));
+                        for (id, rect) in s.rectangles() {
+                            let content = s.content_rect(rect);
+                            assert!(content.x <= width && content.y <= height);
+                            assert!(content.x + content.width <= width);
+                            assert!(content.y + content.height <= height);
+                            assert!(effects.contains(&Effect::Resize {
+                                id,
+                                rows: content.height.max(1),
+                                cols: content.width.max(1),
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
     fn spawn_id(effects: &[Effect]) -> PaneId {
         match effects[0] {
             Effect::Spawn { id, .. } => id,
@@ -691,8 +756,8 @@ mod ui_tests {
     #[test]
     fn chrome_resize_effects_match_content_and_tiny_sizes_stay_bounded() {
         let mut s = start();
-        let chrome = PaneChrome {
-            header: false,
+        let chrome = PaneLayout {
+            headers: false,
             padding_x: 2,
             padding_y: 1,
         };

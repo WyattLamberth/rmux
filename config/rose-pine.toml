@@ -32,7 +32,7 @@ Esc = "cancel"
 d = "detach"
 
 [pane]
-header = false
+headers = false
 padding_x = 0
 padding_y = 0
 inherit_cwd = true

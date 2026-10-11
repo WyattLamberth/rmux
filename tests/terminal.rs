@@ -26,6 +26,12 @@ impl Client {
     fn start() -> Self {
         Self::with_config("[pane]\nheader = true\n")
     }
+    fn start_layout(headers: bool, padding: u16, top: bool) -> Self {
+        Self::with_config(&format!(
+            "[pane]\nheaders = {headers}\npadding = {padding}\n[status]\nposition = \"{}\"\n",
+            if top { "top" } else { "bottom" }
+        ))
+    }
     fn with_config(config: &str) -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let config_path = std::env::temp_dir().join(format!(
@@ -253,4 +259,92 @@ fn padding_pty_size_and_native_reload_keep_shells_alive() {
     assert!(client.contents().contains("22 80"));
     client.send(b"\x02qy");
     client.finish();
+}
+
+#[test]
+fn configurable_content_geometry_matches_real_shell_and_cursor() {
+    for headers in [false, true] {
+        for padding in [0, 1] {
+            for top in [false, true] {
+                let mut client = Client::start_layout(headers, padding, top);
+                client.wait(|client| client.contents().contains("rmux"));
+                let rows = 23 - u16::from(headers) - padding * 2;
+                let cols = 80 - padding * 2;
+                client.send(b"stty -echo; stty size; printf 'GEOMETRY_'; printf 'READY'\r");
+                client.wait(|client| client.contents().contains("GEOMETRY_READY"));
+                assert!(client.contents().contains(&format!("{rows} {cols}")));
+                assert_eq!(
+                    client
+                        .screen
+                        .screen()
+                        .rows(0, 80)
+                        .nth(usize::from(top))
+                        .unwrap()
+                        .contains("* pane 1"),
+                    headers
+                );
+                // Move to the last content cell: top status must not hide this cursor.
+                client.send(format!("PS1=; printf '\\033[{rows};{cols}H'\r").as_bytes());
+                let expected = (
+                    u16::from(top) + u16::from(headers) + padding + rows - 1,
+                    padding + cols - 1,
+                );
+                client.wait(|client| {
+                    client.screen.screen().cursor_position() == expected
+                        && !client.screen.screen().hide_cursor()
+                });
+                client.send(b"\x02%stty size; printf 'COLUMN_'; printf 'READY'\r");
+                client.wait(|client| client.contents().contains("COLUMN_READY"));
+                assert!(
+                    client
+                        .contents()
+                        .contains(&format!("{rows} {}", 40 - padding * 2))
+                );
+                client.send(b"\x02\"stty -echo; stty size; printf 'NESTED_'; printf 'READY'\r");
+                client.wait(|client| client.contents().contains("NESTED_READY"));
+                assert!(client.contents().contains(&format!(
+                    "{} {}",
+                    11 - u16::from(headers) - padding * 2,
+                    40 - padding * 2
+                )));
+                client.send(b"\x02zstty size; printf 'ZOOM_'; printf 'READY'\r");
+                client.wait(|client| client.contents().contains("ZOOM_READY"));
+                assert!(client.contents().contains(&format!("{rows} {cols}")));
+                client
+                    ._master
+                    .resize(PtySize {
+                        rows: 18,
+                        cols: 50,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .unwrap();
+                client.screen.screen_mut().set_size(18, 50);
+                let resized_rows = 17 - u16::from(headers) - padding * 2;
+                let resized_cols = 50 - padding * 2;
+                // Query the real shell until the adapter has propagated the outer size.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    client.send(b"stty size\r");
+                    client.read();
+                    if client
+                        .contents()
+                        .contains(&format!("{resized_rows} {resized_cols}"))
+                    {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "inner PTY did not resize: headers={headers} padding={padding} top={top}, screen={:?}",
+                        client.contents()
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                client.send(b"\x02q");
+                client.wait(|client| client.contents().contains("Quit and terminate"));
+                client.send(b"y");
+                client.finish();
+            }
+        }
+    }
 }

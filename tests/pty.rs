@@ -153,3 +153,68 @@ fn device_status_query_is_answered_to_the_shell() {
         text.contains("1b") && text.contains("5b") && text.contains("30") && text.contains("6e")
     });
 }
+
+#[test]
+fn tiny_configured_viewports_render_without_showing_an_outside_cursor() {
+    use crossterm::style::Color;
+    use rmux::adapters::render::{Chrome, draw};
+    use rmux_core::{Limits, PaneLayout, Rect, Session};
+    use std::collections::BTreeMap;
+    let pane = Pane::spawn(&shell(), 2, 2).unwrap();
+    let panes = BTreeMap::from([(1, pane)]);
+    for headers in [false, true] {
+        for padding in [0, 1, 16] {
+            for top in [false, true] {
+                let chrome = Chrome {
+                    status_fg: Color::White,
+                    status_bg: Color::Blue,
+                    pane_fg: Color::White,
+                    pane_bg: Color::Black,
+                    active_fg: Color::White,
+                    active_bg: Color::Black,
+                    top,
+                    headers,
+                    border_fg: Color::White,
+                    active_border_fg: Color::White,
+                    left: "rmux".into(),
+                    right: String::new(),
+                    left_length: 40,
+                    right_length: 60,
+                    message_fg: Color::White,
+                    message_bg: Color::Blue,
+                };
+                for width in 0..5 {
+                    for height in 0u16..5 {
+                        let session = Session::with_options(
+                            Rect {
+                                x: 0,
+                                y: u16::from(top && height > 0),
+                                width,
+                                height: height.saturating_sub(1),
+                            },
+                            Limits::default(),
+                            PaneLayout::new(headers, padding).unwrap(),
+                        );
+                        let frame = draw(&session, &panes, (width, height), "S", &chrome).unwrap();
+                        let mut screen = vt100::Parser::new(height.max(2), width.max(2), 0);
+                        screen.process(&frame);
+                        if width > 0 && height > 0 {
+                            assert_eq!(
+                                screen
+                                    .screen()
+                                    .cell(if top { 0 } else { height - 1 }, 0)
+                                    .unwrap()
+                                    .contents(),
+                                "S"
+                            );
+                        }
+                        let content = session.content_rect(session.rectangles()[0].1);
+                        if content.width == 0 || content.height == 0 {
+                            assert!(screen.screen().hide_cursor());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

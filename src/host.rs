@@ -66,7 +66,7 @@ pub fn chrome(config: &Config) -> render::Chrome {
         active_fg: color(&config.style.active_fg),
         active_bg: color(&config.style.active_bg),
         top: config.status.top,
-        header: config.pane.header,
+        headers: config.pane.headers,
         border_fg: color(&config.style.pane_fg),
         active_border_fg: color(&config.style.active_bg),
         right: config.status_right(),
@@ -80,7 +80,7 @@ pub fn area(width: u16, height: u16, top: bool) -> rmux_core::Rect {
     if top {
         rmux_core::Rect {
             x: 0,
-            y: 1,
+            y: u16::from(height > 0),
             width,
             height: height.saturating_sub(1),
         }

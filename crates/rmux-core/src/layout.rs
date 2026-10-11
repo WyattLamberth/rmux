@@ -8,49 +8,45 @@ pub struct Rect {
     pub height: u16,
 }
 
-impl Rect {
-    pub fn content(self) -> Self {
-        Self {
-            y: self.y.saturating_add(1),
-            height: self.height.saturating_sub(1),
-            ..self
-        }
-    }
-}
-
 /// Display geometry shared by PTY sizing and rendering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PaneChrome {
-    pub header: bool,
+pub struct PaneLayout {
+    pub headers: bool,
     pub padding_x: u16,
     pub padding_y: u16,
 }
-impl Default for PaneChrome {
+impl Default for PaneLayout {
     fn default() -> Self {
         Self {
-            header: true,
+            headers: false,
             padding_x: 0,
             padding_y: 0,
         }
     }
 }
-impl PaneChrome {
+impl PaneLayout {
+    pub fn new(headers: bool, padding: u16) -> Result<Self, &'static str> {
+        if padding > 16 {
+            return Err("pane padding exceeds 16 cells");
+        }
+        Ok(Self {
+            headers,
+            padding_x: padding,
+            padding_y: padding,
+        })
+    }
     pub fn content(self, rect: Rect) -> Rect {
-        let top = u16::from(self.header)
-            .saturating_add(self.padding_y)
-            .min(rect.height);
-        let left = self.padding_x.min(rect.width);
+        let top = u16::from(self.headers).min(rect.height);
+        let inset_x = self.padding_x.min(rect.width / 2);
+        let inset_y = self.padding_y.min(rect.height.saturating_sub(top) / 2);
         Rect {
-            x: rect.x.saturating_add(left),
-            y: rect.y.saturating_add(top),
-            width: rect
-                .width
-                .saturating_sub(left)
-                .saturating_sub(self.padding_x),
+            x: rect.x.saturating_add(inset_x),
+            y: rect.y.saturating_add(top).saturating_add(inset_y),
+            width: rect.width.saturating_sub(self.padding_x.saturating_mul(2)),
             height: rect
                 .height
                 .saturating_sub(top)
-                .saturating_sub(self.padding_y),
+                .saturating_sub(self.padding_y.saturating_mul(2)),
         }
     }
 }
@@ -228,7 +224,7 @@ mod tests {
                     height,
                     ..Rect::default()
                 }) {
-                    let _ = rect.content();
+                    let _ = PaneLayout::default().content(rect);
                     assert!(rect.width <= width);
                     assert!(rect.height <= height);
                 }

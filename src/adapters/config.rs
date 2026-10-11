@@ -87,15 +87,15 @@ pub struct StyleConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneConfig {
-    pub header: bool,
+    pub headers: bool,
     pub padding_x: u16,
     pub padding_y: u16,
     pub inherit_cwd: bool,
 }
 impl PaneConfig {
-    pub fn chrome(&self) -> rmux_core::PaneChrome {
-        rmux_core::PaneChrome {
-            header: self.header,
+    pub fn chrome(&self) -> rmux_core::PaneLayout {
+        rmux_core::PaneLayout {
+            headers: self.headers,
             padding_x: self.padding_x,
             padding_y: self.padding_y,
         }
@@ -212,7 +212,7 @@ impl Default for Config {
                 message_bg: "#26233a".into(),
             },
             pane: PaneConfig {
-                header: false,
+                headers: false,
                 padding_x: 0,
                 padding_y: 0,
                 inherit_cwd: true,
@@ -269,6 +269,13 @@ fn default_keys() -> Keys {
 }
 
 impl Config {
+    pub fn pane_layout(&self) -> Result<rmux_core::PaneLayout> {
+        anyhow::ensure!(
+            self.pane.padding_x <= 32 && self.pane.padding_y <= 32,
+            "pane padding exceeds 32 cells"
+        );
+        Ok(self.pane.chrome())
+    }
     pub fn shell(&self) -> String {
         if !self.session.default_shell.is_empty() {
             return self.session.default_shell.clone();
@@ -316,13 +323,40 @@ impl Config {
     }
 
     pub fn help_line(&self) -> String {
-        let bindings: Vec<_> = self
+        let bindings = self
             .keys
             .prefix
             .iter()
-            .map(|(key, action)| format!("{}:{action:?}", display_key(key)))
-            .collect();
-        format!(" {} {} ", self.prefix_label(), bindings.join(" "))
+            .map(|(key, action)| {
+                let label = match action {
+                    Action::SplitColumns => "columns",
+                    Action::SplitRows => "rows",
+                    Action::FocusNext => "next pane",
+                    Action::FocusPrevious => "previous pane",
+                    Action::FocusLeft => "left",
+                    Action::FocusDown => "down",
+                    Action::FocusUp => "up",
+                    Action::FocusRight => "right",
+                    Action::NewWindow => "new window",
+                    Action::WindowNext => "next window",
+                    Action::WindowPrevious => "previous window",
+                    Action::Reload => "reload",
+                    Action::Zoom => "zoom",
+                    Action::ScrollUp => "scroll up",
+                    Action::ScrollDown => "scroll down",
+                    Action::CloseFocused => "close",
+                    Action::Quit => "quit",
+                    Action::Help => "help",
+                    Action::SendPrefix => "send prefix",
+                    Action::Cancel => "cancel",
+                    Action::Detach => "detach",
+                    Action::RunShell(_) => "run shell",
+                };
+                format!("{} {label}", display_key(key))
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        format!(" {} : {bindings} ", self.prefix_label())
     }
     pub fn prefix_bytes(&self) -> Vec<u8> {
         super::input::encode_key(
@@ -735,7 +769,9 @@ struct StyleFile {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PaneFile {
-    header: Option<bool>,
+    #[serde(alias = "header")]
+    headers: Option<bool>,
+    padding: Option<u16>,
     padding_x: Option<u16>,
     padding_y: Option<u16>,
     inherit_cwd: Option<bool>,
@@ -854,8 +890,13 @@ impl FileConfig {
             }
         }
         if let Some(pane) = self.pane {
-            if let Some(header) = pane.header {
-                config.pane.header = header;
+            if let Some(padding) = pane.padding {
+                rmux_core::PaneLayout::new(false, padding).map_err(|e| anyhow::anyhow!(e))?;
+                config.pane.padding_x = padding;
+                config.pane.padding_y = padding;
+            }
+            if let Some(headers) = pane.headers {
+                config.pane.headers = headers;
             }
             if let Some(value) = pane.padding_x {
                 config.pane.padding_x = value;
@@ -1016,7 +1057,7 @@ left_length = 40
 right_length = 60
 
 [pane]
-header = false
+headers = false
 padding_x = 0
 padding_y = 0
 inherit_cwd = true
@@ -1148,7 +1189,7 @@ mod ui_tests {
         raw.overlay(&mut config).unwrap();
         validate(&config).unwrap();
         assert_eq!(config.session.history_limit, 50000);
-        assert!(!config.pane.header);
+        assert!(!config.pane.headers);
         assert!(config.input.mouse);
         assert!(
             config
@@ -1195,6 +1236,25 @@ mod ui_tests {
         config.status.right = "#S".into();
         config.session.name = "%Q".into();
         assert!(validate(&config).is_err());
+    }
+    #[test]
+    fn pane_layout_shorthand_and_header_alias_are_compatible() {
+        let mut config = Config::default();
+        let raw: FileConfig = toml::from_str("[pane]\nheaders = true\npadding = 16\n").unwrap();
+        raw.overlay(&mut config).unwrap();
+        validate(&config).unwrap();
+        assert!(config.pane.headers);
+        assert_eq!(config.pane.padding_x, 16);
+        assert_eq!(config.pane.padding_y, 16);
+        let raw: FileConfig =
+            toml::from_str("[pane]\nheader = false\npadding = 1\npadding_y = 2\n").unwrap();
+        raw.overlay(&mut config).unwrap();
+        validate(&config).unwrap();
+        assert!(!config.pane.headers);
+        assert_eq!(config.pane.padding_x, 1);
+        assert_eq!(config.pane.padding_y, 2);
+        let raw: FileConfig = toml::from_str("[pane]\npadding = 17\n").unwrap();
+        assert!(raw.overlay(&mut config).is_err());
     }
     #[test]
     fn custom_prefix_and_root_bindings_are_honored() {

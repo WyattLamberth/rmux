@@ -25,7 +25,7 @@ pub struct Chrome {
     pub active_fg: Color,
     pub active_bg: Color,
     pub top: bool,
-    pub header: bool,
+    pub headers: bool,
     pub border_fg: Color,
     pub active_border_fg: Color,
     pub left: String,
@@ -62,7 +62,7 @@ pub fn draw(
             continue;
         }
         let active = session.focused() == Some(id);
-        if chrome.header {
+        if chrome.headers {
             queue!(
                 frame,
                 MoveTo(rect.x, rect.y),

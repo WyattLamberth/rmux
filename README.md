@@ -39,6 +39,22 @@ Configuration is `~/.config/rmux/rmux.toml` (or under `$XDG_CONFIG_HOME`). A mis
 zero padding and your `$SHELL`. `rmux --print-default-config` prints them. The file must be owned by
 you and must not be group or world writable.
 
+Pane headers are hidden by default, with zero padding and a bottom status bar.
+To restore headers or add space around shell content, configure:
+
+```toml
+[pane]
+headers = true
+padding = 1
+```
+
+Padding accepts 0–16 cells on each side, below the optional header. Split, zoom,
+resize, PTY dimensions and cursor placement use that same content area. A small
+terminal temporarily shows only the focused pane; an empty content area hides
+the cursor. The terminal emulator still uses a minimum 2×2 screen and clips it
+to the available area. Padding defaults to zero; no tmux configuration import
+is provided.
+
 Persistent sessions are off unless you pass `--persist` or set `server.persist`.
 Detach with `Ctrl-b d`. The server keeps the shells. Run `rmux --persist` again
 to attach to the latest screen. `rmux attach user@host` bootstraps that server
@@ -80,7 +96,7 @@ It is a TOML configuration; rmux does not parse `.tmux.conf`.
 
 ```toml
 [pane]
-header = false
+headers = false
 padding_x = 0
 padding_y = 0
 inherit_cwd = true
@@ -95,8 +111,9 @@ interval_ms = 5000
 message_time_ms = 4000
 ```
 
-`header` controls the per-pane label. Padding is measured in terminal cells on
-both sides of each axis, capped at 32 per side. Separators occupy their own
+`headers` controls the per-pane label. Padding is measured in terminal cells on
+both sides of each axis, capped at 32 per side. `padding` is a shorthand for both
+axes, capped at 16; explicit `padding_x`/`padding_y` override the shorthand. Separators occupy their own
 cells; rendering and PTY sizes use the same geometry. Small terminals show only
 the focused pane when the full layout cannot fit.
 

@@ -19,7 +19,7 @@ fn chrome(config: &Config) -> Chrome {
         border_fg: color(&config.style.pane_fg),
         active_border_fg: color(&config.style.active_bg),
         top: config.status.top,
-        header: config.pane.header,
+        headers: config.pane.headers,
         left: config.status_left(),
         right: config.status_right(),
         left_length: config.status.left_length,
@@ -32,10 +32,10 @@ fn rose_pine_cells_optional_headers_and_tiny_top_bottom_status() {
     let shell = std::env::var("RMUX_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let panes = BTreeMap::from([(1, Pane::spawn(&shell, 24, 80).unwrap())]);
     let mut config = Config::default();
-    for header in [false, true] {
+    for headers in [false, true] {
         for top in [false, true] {
             for (width, height) in [(0u16, 0u16), (1, 1), (2, 2), (4, 3), (80, 24)] {
-                config.pane.header = header;
+                config.pane.headers = headers;
                 config.status.top = top;
                 let mut session = Session::new(Rect {
                     x: 0,
@@ -65,7 +65,7 @@ fn rose_pine_cells_optional_headers_and_tiny_top_bottom_status() {
                             .unwrap()
                             .bgcolor(),
                         vt100::Color::Rgb(196, 167, 231),
-                        "header={header} top={top} rgb sequences={}",
+                        "headers={headers} top={top} rgb sequences={}",
                         frame.windows(6).filter(|b| *b == b"48;2;1").count()
                     );
                     assert_eq!(
@@ -75,7 +75,7 @@ fn rose_pine_cells_optional_headers_and_tiny_top_bottom_status() {
                             .nth(usize::from(top))
                             .unwrap()
                             .contains("* pane 1"),
-                        header
+                        headers
                     );
                 }
             }

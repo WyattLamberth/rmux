@@ -182,10 +182,21 @@ fn attached(mut config: Config, config_path: Option<PathBuf>) -> Result<()> {
     let mut status_tick = Instant::now();
     let mut dirty = true;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
+    let mut last_size_check = Instant::now();
     let mut output_cursor = 0usize;
     let mut chrome = chrome(&config);
     let mut stdout = io::stdout().lock();
     while !app.host.panes.is_empty() && !stopped.load(Ordering::Relaxed) {
+        // Resize events can be delayed behind queued input. Sample at a bounded rate.
+        if last_size_check.elapsed() >= Duration::from_millis(250) {
+            let current = terminal::size().context("get terminal size")?;
+            if current != dimensions {
+                dimensions = current;
+                app.dispatch(Event::Resize(area(current.0, current.1, config.status.top)));
+                dirty = true;
+            }
+            last_size_check = Instant::now();
+        }
         if status_tick.elapsed() >= Duration::from_millis(config.status.interval_ms.max(100)) {
             status_tick = Instant::now();
             dirty = true;
