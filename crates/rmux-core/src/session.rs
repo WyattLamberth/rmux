@@ -1,8 +1,40 @@
 use crate::{Axis, Layout, PaneId, Rect};
 
 pub const MAX_PANES: usize = 32;
+pub const HARD_MAX_PANES: usize = MAX_PANES;
+pub const HARD_WRITE_LIMIT: usize = 65_536;
 const MIN_WIDTH: u16 = 2;
 const MIN_HEIGHT: u16 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    pub max_panes: usize,
+    pub write_limit: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_panes: HARD_MAX_PANES,
+            write_limit: HARD_WRITE_LIMIT,
+        }
+    }
+}
+
+impl Limits {
+    pub fn new(max_panes: usize, write_limit: usize) -> Result<Self, &'static str> {
+        if !(1..=HARD_MAX_PANES).contains(&max_panes) {
+            return Err("max_panes out of range");
+        }
+        if write_limit == 0 || write_limit > HARD_WRITE_LIMIT {
+            return Err("write_limit out of range");
+        }
+        Ok(Self {
+            max_panes,
+            write_limit,
+        })
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -10,6 +42,8 @@ pub enum Event {
     Spawned(PaneId),
     SpawnFailed(PaneId),
     Close(PaneId),
+    /// Drop the display. Shells stay open.
+    Detach,
     FocusNext,
     FocusPrevious,
     Zoom,
@@ -38,10 +72,15 @@ pub struct Session {
     zoomed: bool,
     next_id: PaneId,
     pending: Option<Pending>,
+    limits: Limits,
 }
 impl Session {
     /// The adapter must create pane 1 before constructing the session.
     pub fn new(area: Rect) -> Self {
+        Self::with_limits(area, Limits::default())
+    }
+
+    pub fn with_limits(area: Rect, limits: Limits) -> Self {
         Self {
             layout: Some(Layout::Pane(1)),
             area,
@@ -49,6 +88,7 @@ impl Session {
             zoomed: false,
             next_id: 2,
             pending: None,
+            limits,
         }
     }
     pub fn focused(&self) -> Option<PaneId> {
@@ -106,8 +146,11 @@ impl Session {
                 if self.pending.is_some() {
                     return vec![Effect::Notice("A split is already pending".into())];
                 }
-                if self.pane_ids().len() >= MAX_PANES {
-                    return vec![Effect::Notice("Pane limit reached (32)".into())];
+                if self.pane_ids().len() >= self.limits.max_panes {
+                    return vec![Effect::Notice(format!(
+                        "Pane limit reached ({})",
+                        self.limits.max_panes
+                    ))];
                 }
                 let (Some(target), Some(mut proposed)) = (self.focus, self.layout.clone()) else {
                     return effects;
@@ -162,6 +205,7 @@ impl Session {
                     effects.push(Effect::Close { id });
                 }
             }
+            Event::Detach => {}
             Event::Close(id) => {
                 if self
                     .pending
@@ -206,8 +250,11 @@ impl Session {
                 effects.extend(self.sizes());
             }
             Event::Write(bytes) => {
-                if bytes.len() > 65_536 {
-                    effects.push(Effect::Notice("Write exceeds 65536 byte limit".into()));
+                if bytes.len() > self.limits.write_limit {
+                    effects.push(Effect::Notice(format!(
+                        "Write exceeds {} byte limit",
+                        self.limits.write_limit
+                    )));
                 } else if let Some(id) = self.focus {
                     effects.push(Effect::Write { id, bytes });
                 }

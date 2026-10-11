@@ -1,5 +1,5 @@
 //! Replay with RMUX_TEST_SEED and RMUX_TEST_STEPS. No OS randomness or wall clock.
-use rmux_core::{Axis, Controller, Effect, Event, Layout, PaneHost, PaneId, Rect, Session};
+use rmux_core::{Axis, Controller, Effect, Event, Layout, Limits, PaneHost, PaneId, Rect, Session};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Default)]
@@ -387,4 +387,101 @@ fn backend_faults_use_production_transitions() {
     assert!(c.session.pane_ids().is_empty());
     assert!(c.host.live.is_empty());
     assert!(!c.notices.is_empty());
+}
+
+fn desktop() -> (Controller<Host>, Rect) {
+    let area = Rect {
+        width: 80,
+        height: 24,
+        ..Rect::default()
+    };
+    (Controller::new(Session::new(area), Host::initial()), area)
+}
+
+#[test]
+fn fresh_session_focuses_pane_one() {
+    let (session, _) = desktop();
+    assert_eq!(session.session.focused(), Some(1));
+    assert_eq!(session.session.pane_ids(), vec![1]);
+}
+
+#[test]
+fn column_split_focuses_the_new_pane() {
+    let (mut session, _) = desktop();
+    session.dispatch(Event::Split(Axis::Columns));
+    assert_eq!(session.session.pane_ids(), vec![1, 2]);
+    assert_eq!(session.session.focused(), Some(2));
+}
+
+#[test]
+fn focus_wraps_around_two_panes() {
+    let (mut session, _) = desktop();
+    session.dispatch(Event::Split(Axis::Rows));
+    session.dispatch(Event::FocusNext);
+    assert_eq!(session.session.focused(), Some(1));
+    session.dispatch(Event::FocusPrevious);
+    assert_eq!(session.session.focused(), Some(2));
+}
+
+#[test]
+fn zoom_shows_only_the_focused_pane() {
+    let (mut session, area) = desktop();
+    session.dispatch(Event::Split(Axis::Columns));
+    session.dispatch(Event::Zoom);
+    assert_eq!(session.session.rectangles(), vec![(2, area)]);
+    session.dispatch(Event::Zoom);
+    assert_eq!(session.session.rectangles().len(), 2);
+}
+
+#[test]
+fn closing_the_last_pane_clears_focus() {
+    let (mut session, _) = desktop();
+    session.dispatch(Event::Close(1));
+    assert!(session.session.pane_ids().is_empty());
+    assert_eq!(session.session.focused(), None);
+}
+
+#[test]
+fn write_reaches_the_focused_pane() {
+    let (mut session, _) = desktop();
+    session.dispatch(Event::Write(b"hi".to_vec()));
+    assert_eq!(session.host.output.back().unwrap().2, b"hi");
+}
+
+#[test]
+fn tiny_terminal_refuses_a_split() {
+    let area = Rect {
+        width: 2,
+        height: 2,
+        ..Rect::default()
+    };
+    let mut session = Controller::new(Session::new(area), Host::initial());
+    session.dispatch(Event::Split(Axis::Columns));
+    assert_eq!(session.session.pane_ids(), vec![1]);
+    assert!(!session.notices.is_empty());
+}
+
+#[test]
+fn pane_limit_stops_at_the_configured_cap() {
+    let area = Rect {
+        width: 200,
+        height: 80,
+        ..Rect::default()
+    };
+    let mut session = Controller::new(
+        Session::with_limits(area, Limits::new(2, 64).unwrap()),
+        Host::initial(),
+    );
+    session.dispatch(Event::Split(Axis::Columns));
+    session.dispatch(Event::Split(Axis::Rows));
+    assert_eq!(session.session.pane_ids().len(), 2);
+    assert!(!session.notices.is_empty());
+}
+
+#[test]
+fn detach_keeps_the_shell() {
+    let (mut session, _) = desktop();
+    session.dispatch(Event::Detach);
+    assert_eq!(session.session.pane_ids(), vec![1]);
+    assert_eq!(session.host.live.len(), 1);
 }

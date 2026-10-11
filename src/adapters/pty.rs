@@ -32,6 +32,16 @@ pub struct Pane {
 
 impl Pane {
     pub fn spawn(shell: &str, rows: u16, cols: u16) -> Result<Self> {
+        Self::spawn_with(shell, &[], rows, cols, 2000)
+    }
+
+    pub fn spawn_with(
+        program: &str,
+        args: &[String],
+        rows: u16,
+        cols: u16,
+        history_limit: usize,
+    ) -> Result<Self> {
         let rows = rows.max(2);
         // vt100 0.16 requires at least two rows/columns for wrapping wide text.
         let cols = cols.max(2);
@@ -42,7 +52,10 @@ impl Pane {
         // Acquire fallible resources before spawning, so setup errors cannot orphan a child.
         let mut reader = pair.master.try_clone_reader().context("clone PTY reader")?;
         let mut writer = pair.master.take_writer().context("open PTY writer")?;
-        let mut command = CommandBuilder::new(shell);
+        let mut command = CommandBuilder::new(program);
+        for arg in args {
+            command.arg(arg);
+        }
         command.cwd(std::env::current_dir().context("get shell working directory")?);
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
@@ -50,7 +63,7 @@ impl Pane {
         let child = pair
             .slave
             .spawn_command(command)
-            .with_context(|| format!("spawn shell {shell:?}"))?;
+            .with_context(|| format!("spawn shell {program:?}"))?;
         drop(pair.slave);
         // At most 256 KiB of pending output per pane; a noisy process gets backpressure.
         let (sender, output) = mpsc::sync_channel(64);
@@ -62,7 +75,12 @@ impl Pane {
             input,
             child,
             output,
-            parser: vt100::Parser::new_with_callbacks(rows, cols, 2000, QueryReplies::default()),
+            parser: vt100::Parser::new_with_callbacks(
+                rows,
+                cols,
+                history_limit.min(100_000),
+                QueryReplies::default(),
+            ),
             closed: false,
             stop: Arc::clone(&stop),
             workers: Vec::new(),
