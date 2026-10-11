@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 5s
+  scrape_timeout: 3s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: rmux
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:9464']
+    # Keep only the exporter contract; never retain unexpected content labels.
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'rmux_(panes|pty_bytes_total|frames_total|errors_total|uptime_seconds)'
+        action: keep
+      - regex: '__name__|job|instance'
+        action: labelkeep

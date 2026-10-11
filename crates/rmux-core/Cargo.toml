@@ -1,0 +1,11 @@
+[package]
+name = "rmux-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

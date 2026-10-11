@@ -1,0 +1,28 @@
+[package]
+name = "rmux"
+version = "0.1.0"
+edition = "2024"
+description = "A small, safe Rust terminal multiplexer"
+license = "MIT"
+
+[workspace]
+members = ["crates/rmux-core"]
+resolver = "3"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.29"
+portable-pty = "0.9"
+signal-hook = "0.3"
+vt100 = "0.16"
+rmux-core = { path = "crates/rmux-core" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.28", features = ["fs", "process", "signal"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+

@@ -1,0 +1,16 @@
+name: Bug report
+description: Report incorrect behavior or a deterministic universe failure.
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: replay
+    attributes:
+      label: Reproduction
+      description: Include version, Linux environment, seed, step count, and sanitized replay trace. Omit terminal contents and secrets.
+    validations:
+      required: true
