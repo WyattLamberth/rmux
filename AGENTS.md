@@ -7,6 +7,13 @@ is necessary. Never claim a human reviewed generated code.
 
 Track planned work and unresolved defects in the public GitHub issue queue.
 Use issue-linked branches and pull requests with accurate validation results.
+Also maintain delivery planning in the owner's connected Linear workspace:
+link GitHub issues/PRs, track milestones, priorities, dependencies, and status,
+and mark Done only after merge and required validation. Use Scrum principles:
+sprint goals, refined backlog, Linear cycles, estimates, daily inspection,
+sprint reviews and retrospectives; keep native charts backed by actual work.
+See docs/PLAN.md.
+If Linear is not connected, keep the plan current locally until it is available.
 Do not publish secrets, machine credentials, shell transcripts, or private data.
 
 Keep the session state machine deterministic: real PTYs, clocks, signals,
