@@ -100,7 +100,7 @@ jobs:
       - run: cargo llvm-cov --workspace --locked --all-targets --all-features --no-report
       - run: cargo llvm-cov --workspace --locked --all-targets --all-features --no-run --html --output-dir coverage
       - run: cargo llvm-cov --workspace --locked --all-targets --all-features --no-run --lcov --output-path coverage/lcov.info
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: workspace-coverage
           path: coverage/
@@ -127,7 +127,7 @@ jobs:
           uname -a >> benchmark-results/environment.txt
           printf 'revision=%s\n' "$GITHUB_SHA" >> benchmark-results/environment.txt
           cargo run --locked --release --package rmux --example benchmark | tee benchmark-results/benchmark.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: linux-transition-benchmark
           path: benchmark-results/
@@ -202,7 +202,7 @@ jobs:
             --target x86_64-unknown-linux-gnu \
             --binary target/x86_64-unknown-linux-gnu/release/rmux
           (cd dist && sha256sum --check ./*.sha256)
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rmux-${{ github.ref_name }}-x86_64-unknown-linux-gnu
           path: dist/*
