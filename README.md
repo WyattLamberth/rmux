@@ -1,12 +1,11 @@
 # rmux
 
-A terminal multiplexer written in safe, idiomatic Rust. This project is being
-implemented entirely by **AI agents**, coordinated by **OpenAI Codex**, with product direction from
-[@WyattLamberth](https://github.com/WyattLamberth). AI writes the code, tests,
-documentation, and infrastructure and manages the GitHub work queue. Codex commits
-are attributed to `Codex <codex@openai.com>`; contributions from other AI agents
-retain their attribution. Human guidance does not imply a
-human code review. This is an independent project, not an OpenAI product.
+A terminal multiplexer written in safe, idiomatic Rust. AI agents implement
+this project under product direction from
+[@WyattLamberth](https://github.com/WyattLamberth). Any agent may write the
+code, tests, documentation, and infrastructure. This is not a ChatGPT-only
+effort. Human guidance does not imply a human code review. This is an
+independent project, not an OpenAI product.
 
 ## Status
 
