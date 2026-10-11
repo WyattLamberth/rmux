@@ -23,7 +23,7 @@ pub struct Pane {
     input: SyncSender<Vec<u8>>,
     child: Box<dyn Child + Send + Sync>,
     output: Receiver<Output>,
-    parser: vt100::Parser,
+    parser: vt100::Parser<QueryReplies>,
     closed: bool,
     stop: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
@@ -60,7 +60,7 @@ impl Pane {
             input,
             child,
             output,
-            parser: vt100::Parser::new(rows, cols, 2000),
+            parser: vt100::Parser::new_with_callbacks(rows, cols, 2000, QueryReplies::default()),
             closed: false,
             stop: Arc::clone(&stop),
             workers: Vec::new(),
@@ -174,6 +174,7 @@ impl Pane {
                 Ok(Output::Data(bytes)) => {
                     received += bytes.len();
                     self.parser.process(&bytes);
+                    self.flush_replies();
                 }
                 Ok(Output::Closed) | Err(TryRecvError::Disconnected) => {
                     self.closed = true;
@@ -198,6 +199,76 @@ impl Pane {
     pub fn scroll(&mut self, delta: isize) {
         let position = self.screen().scrollback().saturating_add_signed(delta);
         self.parser.screen_mut().set_scrollback(position);
+    }
+
+    fn flush_replies(&mut self) {
+        let replies = self.parser.callbacks_mut().take();
+        if !replies.is_empty() {
+            let _ = self.input.try_send(replies);
+        }
+    }
+}
+
+const MAX_QUERY_REPLY: usize = 1024;
+
+#[derive(Default)]
+struct QueryReplies {
+    pending: Vec<u8>,
+}
+
+impl QueryReplies {
+    fn push(&mut self, bytes: &[u8]) {
+        if self.pending.len().saturating_add(bytes.len()) <= MAX_QUERY_REPLY {
+            self.pending.extend_from_slice(bytes);
+        }
+    }
+
+    fn take(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+impl vt100::Callbacks for QueryReplies {
+    fn unhandled_csi(
+        &mut self,
+        screen: &mut vt100::Screen,
+        intermediate: Option<u8>,
+        extra: Option<u8>,
+        params: &[&[u16]],
+        finalizer: char,
+    ) {
+        if extra.is_some() {
+            return;
+        }
+        let param = match params {
+            [] | [[]] => None,
+            [single] if single.len() == 1 => Some(single[0]),
+            _ => return,
+        };
+        match (intermediate, finalizer, param) {
+            (None, 'c', None | Some(0)) => self.push(b"\x1b[?1;2c"),
+            (Some(b'>'), 'c', None | Some(0)) => self.push(b"\x1b[>0;0;0c"),
+            (None, 'n', Some(5)) => self.push(b"\x1b[0n"),
+            (None, 'n', Some(6)) => {
+                let (row, col) = screen.cursor_position();
+                self.push(
+                    format!("\x1b[{};{}R", row.saturating_add(1), col.saturating_add(1)).as_bytes(),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn unhandled_escape(
+        &mut self,
+        _: &mut vt100::Screen,
+        intermediate: Option<u8>,
+        extra: Option<u8>,
+        byte: u8,
+    ) {
+        if intermediate.is_none() && extra.is_none() && byte == b'Z' {
+            self.push(b"\x1b[?1;2c");
+        }
     }
 }
 
@@ -322,5 +393,34 @@ fn size(rows: u16, cols: u16) -> PtySize {
         cols,
         pixel_width: 0,
         pixel_height: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_QUERY_REPLY, QueryReplies};
+
+    fn replies_for(bytes: &[u8]) -> Vec<u8> {
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, QueryReplies::default());
+        parser.process(bytes);
+        parser.callbacks().pending.clone()
+    }
+
+    #[test]
+    fn standard_queries_get_bounded_replies() {
+        assert_eq!(replies_for(b"\x1b[5n"), b"\x1b[0n");
+        assert_eq!(replies_for(b"\x1b[c"), b"\x1b[?1;2c");
+        assert_eq!(replies_for(b"\x1b[0c"), b"\x1b[?1;2c");
+        assert_eq!(replies_for(b"\x1b[>c"), b"\x1b[>0;0;0c");
+        assert_eq!(replies_for(b"\x1bZ"), b"\x1b[?1;2c");
+        assert_eq!(replies_for(b"ab\x1b[6n"), b"\x1b[1;3R");
+        assert!(replies_for(b"\x1b]52;c;?\x07").is_empty());
+        assert!(replies_for(b"\x1b]2;title\x07").is_empty());
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, QueryReplies::default());
+        for _ in 0..400 {
+            parser.process(b"\x1b[5n");
+        }
+        assert!(parser.callbacks().pending.len() <= MAX_QUERY_REPLY);
+        assert!(parser.callbacks().pending.starts_with(b"\x1b[0n"));
     }
 }

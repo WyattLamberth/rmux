@@ -133,3 +133,16 @@ fn close_joins_workers_and_terminates_background_jobs() {
         thread::sleep(Duration::from_millis(5));
     }
 }
+
+#[test]
+fn device_status_query_is_answered_to_the_shell() {
+    let mut pane = Pane::spawn(&shell(), 24, 80).unwrap();
+    pane.write(
+        b"stty -echo -icanon min 1 time 0; (printf '\\033[5n'); dd bs=1 count=4 2>/dev/null | od -An -tx1; printf '\\nDONE\\n'\r",
+    )
+    .unwrap();
+    wait_for(&mut pane, |pane| {
+        let text = pane.screen().contents();
+        text.contains("1b") && text.contains("5b") && text.contains("30") && text.contains("6e")
+    });
+}

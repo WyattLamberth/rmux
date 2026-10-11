@@ -64,6 +64,22 @@ The simulation does not model kernel PTYs, real thread interleavings, network
 packets, or every terminal escape sequence. Those remain explicit adapter test
 obligations. Full deterministic server/transport simulation is future work.
 
+## Terminal capabilities
+
+Shells start with `TERM=xterm-256color`. Child output is parsed into cells; the
+renderer emits its own sequences and does not forward clipboard or title
+controls. The attached Linux adapter currently handles UTF-8 including wide
+characters (viewport clamped to at least 2×2), SGR color and intensity, alternate
+screen, application cursor keys, bracketed paste, and 2,000 lines of scrollback.
+Primary device attributes (`CSI c`, `ESC Z`), secondary attributes (`CSI > c`),
+device status (`CSI 5 n`), and cursor position reports (`CSI 6 n`) are answered
+only to the originating pane. Replies are dropped once 1,024 bytes are pending
+or the pane input queue is full.
+
+Not supported: mouse tracking, copy mode, clipboard or title forwarding, DECRQM,
+XTGETTCAP, XTVERSION, combining-character guarantees, and macOS. Query replies
+are not telemetry.
+
 ## Multi-host direction
 
 Each host will own its running processes through a per-user persistent daemon.
