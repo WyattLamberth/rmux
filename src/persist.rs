@@ -92,7 +92,11 @@ pub fn serve(config: &Config, stdio: bool) -> Result<()> {
         .map_err(|error| anyhow::anyhow!(error))?;
     let mut dimensions = (80u16, 24u16);
     let mut app = Controller::new(
-        Session::with_limits(area(dimensions.0, dimensions.1, config.status.top), limits),
+        Session::with_options(
+            area(dimensions.0, dimensions.1, config.status.top),
+            limits,
+            config.pane_layout()?,
+        ),
         ShellHost {
             shell: config.shell(),
             command: config.session.default_command.clone(),
@@ -100,7 +104,11 @@ pub fn serve(config: &Config, stdio: bool) -> Result<()> {
             panes: Default::default(),
         },
     );
-    app.host.spawn(1, 22, 80)?;
+    let content = app
+        .session
+        .content_rect(area(dimensions.0, dimensions.1, config.status.top));
+    app.host
+        .spawn(1, content.height.max(1), content.width.max(1))?;
     let metrics = Arc::new(Metrics::default());
     let _metrics = start_metrics(config, &metrics)?;
     let stopped = Arc::new(AtomicBool::new(false));

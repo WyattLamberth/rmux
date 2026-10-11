@@ -53,37 +53,39 @@ pub fn draw(
             continue;
         }
         let active = session.focused() == Some(id);
-        queue!(
-            frame,
-            MoveTo(rect.x, rect.y),
-            SetAttribute(Attribute::Reset),
-            SetBackgroundColor(if active {
-                chrome.active_bg
-            } else {
-                chrome.pane_bg
-            }),
-            SetForegroundColor(if active {
-                chrome.active_fg
-            } else {
-                chrome.pane_fg
-            })
-        )?;
-        let label = format!(
-            " {} pane {}{} ",
-            if active { "*" } else { " " },
-            id,
-            if pane.screen().scrollback() > 0 {
-                " [scroll]"
-            } else {
-                ""
-            }
-        );
-        print_line(&mut frame, &label, rect.width.min(width - rect.x))?;
-        let content = rect.content();
+        if session.pane_layout().headers {
+            queue!(
+                frame,
+                MoveTo(rect.x, rect.y),
+                SetAttribute(Attribute::Reset),
+                SetBackgroundColor(if active {
+                    chrome.active_bg
+                } else {
+                    chrome.pane_bg
+                }),
+                SetForegroundColor(if active {
+                    chrome.active_fg
+                } else {
+                    chrome.pane_fg
+                })
+            )?;
+            let label = format!(
+                " {} pane {}{} ",
+                if active { "*" } else { " " },
+                id,
+                if pane.screen().scrollback() > 0 {
+                    " [scroll]"
+                } else {
+                    ""
+                }
+            );
+            print_line(&mut frame, &label, rect.width.min(width - rect.x))?;
+        }
+        let content = session.content_rect(rect);
         for row in 0..content.height.min(height.saturating_sub(content.y)) {
             queue!(frame, MoveTo(content.x, content.y + row))?;
             let mut previous = None;
-            for col in 0..content.width.min(width - content.x) {
+            for col in 0..content.width.min(width.saturating_sub(content.x)) {
                 let Some(cell) = pane.screen().cell(row, col) else {
                     break;
                 };
@@ -133,7 +135,16 @@ pub fn draw(
         print_line(&mut frame, status, width)?;
     }
     queue!(frame, SetAttribute(Attribute::Reset), ResetColor)?;
-    if let Some((x, y)) = cursor.filter(|(x, y)| *x < width && *y < height.saturating_sub(1)) {
+    if let Some((x, y)) = cursor.filter(|(x, y)| {
+        *x < width
+            && *y < height
+            && *y
+                != if chrome.top {
+                    0
+                } else {
+                    height.saturating_sub(1)
+                }
+    }) {
         queue!(frame, MoveTo(x, y), Show)?;
     }
     queue!(frame, EndSynchronizedUpdate)?;

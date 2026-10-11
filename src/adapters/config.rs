@@ -19,6 +19,7 @@ pub const HARD_COMMAND_LEN: usize = 256;
 pub struct Config {
     pub server: ServerConfig,
     pub session: SessionConfig,
+    pub pane: PaneConfig,
     pub input: InputConfig,
     pub keys: Keys,
     pub status: StatusConfig,
@@ -42,6 +43,12 @@ pub struct SessionConfig {
     pub base_index: u64,
     pub write_limit_bytes: usize,
     pub name: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaneConfig {
+    pub headers: bool,
+    pub padding: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,6 +166,7 @@ impl Default for Config {
                 escape_time_ms: 0,
                 repeat_time_ms: 0,
             },
+            pane: PaneConfig::default(),
             keys: default_keys(),
             status: StatusConfig {
                 top: false,
@@ -218,6 +226,10 @@ fn default_keys() -> Keys {
 }
 
 impl Config {
+    pub fn pane_layout(&self) -> Result<rmux_core::PaneLayout> {
+        rmux_core::PaneLayout::new(self.pane.headers, self.pane.padding)
+            .map_err(|error| anyhow::anyhow!(error))
+    }
     pub fn shell(&self) -> String {
         if !self.session.default_shell.is_empty() {
             return self.session.default_shell.clone();
@@ -255,10 +267,32 @@ impl Config {
     }
 
     pub fn help_line(&self) -> String {
-        format!(
-            " {} : % columns | \" rows | o next | d detach | x close | q quit ",
-            self.prefix_label()
-        )
+        let bindings = self
+            .keys
+            .prefix
+            .iter()
+            .map(|(key, action)| {
+                let label = match action {
+                    Action::SplitColumns => "columns",
+                    Action::SplitRows => "rows",
+                    Action::FocusNext => "next pane",
+                    Action::FocusPrevious => "previous pane",
+                    Action::Zoom => "zoom",
+                    Action::ScrollUp => "scroll up",
+                    Action::ScrollDown => "scroll down",
+                    Action::CloseFocused => "close",
+                    Action::Quit => "quit",
+                    Action::Help => "help",
+                    Action::SendPrefix => "send prefix",
+                    Action::Cancel => "cancel",
+                    Action::Detach => "detach",
+                    Action::RunShell(_) => "run shell",
+                };
+                format!("{} {label}", display_key(key))
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        format!(" {} : {bindings} ", self.prefix_label())
     }
 
     pub fn status_left(&self) -> String {
@@ -352,6 +386,7 @@ fn current_uid() -> u32 {
 }
 
 fn validate(config: &Config) -> Result<()> {
+    config.pane_layout()?;
     rmux_core::Limits::new(config.session.max_panes, config.session.write_limit_bytes)
         .map_err(|error| anyhow::anyhow!(error))?;
     if config.session.history_limit > HARD_HISTORY_LIMIT {
@@ -553,6 +588,7 @@ struct FileConfig {
     include: Option<Vec<String>>,
     server: Option<ServerFile>,
     session: Option<SessionFile>,
+    pane: Option<PaneFile>,
     input: Option<InputFile>,
     keys: Option<KeysFile>,
     status: Option<StatusFile>,
@@ -578,6 +614,13 @@ struct SessionFile {
     base_index: Option<u64>,
     write_limit_bytes: Option<usize>,
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaneFile {
+    headers: Option<bool>,
+    padding: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -639,6 +682,14 @@ struct MetricsFile {
 
 impl FileConfig {
     fn overlay(self, config: &mut Config) -> Result<()> {
+        if let Some(pane) = self.pane {
+            if let Some(headers) = pane.headers {
+                config.pane.headers = headers;
+            }
+            if let Some(padding) = pane.padding {
+                config.pane.padding = padding;
+            }
+        }
         if let Some(server) = self.server {
             if let Some(persist) = server.persist {
                 config.server.persist = persist;
@@ -829,6 +880,10 @@ base_index = 1
 write_limit_bytes = 65536
 name = "rmux"
 
+[pane]
+headers = false
+padding = 0
+
 [input]
 prefix = "C-b"
 prefix2 = ""
@@ -900,6 +955,30 @@ mod tests {
     }
 
     #[test]
+    fn pane_layout_defaults_round_trip_and_validate() {
+        let mut config = Config::default();
+        let file: FileConfig = toml::from_str(&print_default_config()).unwrap();
+        file.overlay(&mut config).unwrap();
+        validate(&config).unwrap();
+        assert_eq!(config, Config::default());
+        assert!(!config.pane.headers);
+        assert_eq!(config.pane.padding, 0);
+        let file: FileConfig = toml::from_str("[pane]\nheaders = true\npadding = 16\n").unwrap();
+        file.overlay(&mut config).unwrap();
+        validate(&config).unwrap();
+        assert!(config.pane_layout().unwrap().headers);
+        config.pane.padding = 17;
+        assert!(validate(&config).is_err());
+        for text in [
+            "[pane]\npadding = -1",
+            "[pane]\npadding = 65536",
+            "[pane]\nunknown = true",
+        ] {
+            assert!(toml::from_str::<FileConfig>(text).is_err());
+        }
+    }
+
+    #[test]
     fn custom_prefix_binding_dispatches_without_a_terminal() {
         let dir = env::temp_dir().join(format!("rmux-config-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -914,6 +993,7 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('%'), KeyModifiers::empty());
         assert_eq!(config.binding(true, &key), Some(&Action::SplitColumns));
         assert!(config.is_prefix(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+        assert_eq!(config.help_line(), " Ctrl-a : % columns ");
         let _ = fs::remove_dir_all(&dir);
     }
 

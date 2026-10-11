@@ -1,5 +1,7 @@
 //! Replay with RMUX_TEST_SEED and RMUX_TEST_STEPS. No OS randomness or wall clock.
-use rmux_core::{Axis, Controller, Effect, Event, Layout, Limits, PaneHost, PaneId, Rect, Session};
+use rmux_core::{
+    Axis, Controller, Effect, Event, Layout, Limits, PaneHost, PaneId, PaneLayout, Rect, Session,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Default)]
@@ -164,7 +166,11 @@ fn deterministic_universe() {
             height: 40,
             ..Rect::default()
         };
-        let mut c = Controller::new(Session::new(area), Host::initial());
+        let pane_layout = PaneLayout::new(seed & 1 != 0, (seed % 3) as u16).unwrap();
+        let mut c = Controller::new(
+            Session::with_options(area, Limits::default(), pane_layout),
+            Host::initial(),
+        );
         let mut applied_area = area;
         let mut trace = VecDeque::new();
         let mut queued = VecDeque::new();
@@ -174,7 +180,10 @@ fn deterministic_universe() {
             let ids = c.session.pane_ids();
             // Recreate a universe after shutdown; pane 1 is bootstrapped by the adapter.
             if ids.is_empty() {
-                c = Controller::new(Session::new(area), Host::initial());
+                c = Controller::new(
+                    Session::with_options(area, Limits::default(), pane_layout),
+                    Host::initial(),
+                );
                 queued.clear();
                 applied_area = area;
             }
@@ -223,10 +232,14 @@ fn deterministic_universe() {
                 let outcome =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.dispatch(event)));
                 if let Err(error) = outcome {
-                    panic!("seed={seed} step={step}: backend assertion {error:?}\ntrace={trace:#?}")
+                    panic!(
+                        "seed={seed} step={step} pane_layout={pane_layout:?}: backend assertion {error:?}\ntrace={trace:#?}"
+                    )
                 }
                 if let Err(error) = check(&c, applied_area) {
-                    panic!("seed={seed} step={step}: {error}\ntrace={trace:#?}")
+                    panic!(
+                        "seed={seed} step={step} pane_layout={pane_layout:?}: {error}\ntrace={trace:#?}"
+                    )
                 }
             }
         }

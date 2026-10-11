@@ -8,12 +8,33 @@ pub struct Rect {
     pub height: u16,
 }
 
-impl Rect {
-    pub fn content(self) -> Self {
-        Self {
-            y: self.y.saturating_add(1),
-            height: self.height.saturating_sub(1),
-            ..self
+/// Shared geometry for PTY sizing, split admission, rendering and cursor placement.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PaneLayout {
+    pub headers: bool,
+    padding: u16,
+}
+
+impl PaneLayout {
+    pub fn new(headers: bool, padding: u16) -> Result<Self, &'static str> {
+        if padding > 16 {
+            return Err("pane padding exceeds 16 cells");
+        }
+        Ok(Self { headers, padding })
+    }
+
+    pub fn content(self, rect: Rect) -> Rect {
+        let top = u16::from(self.headers).min(rect.height);
+        let inset_x = self.padding.min(rect.width / 2);
+        let inset_y = self.padding.min(rect.height.saturating_sub(top) / 2);
+        Rect {
+            x: rect.x.saturating_add(inset_x),
+            y: rect.y.saturating_add(top).saturating_add(inset_y),
+            width: rect.width.saturating_sub(self.padding * 2),
+            height: rect
+                .height
+                .saturating_sub(top)
+                .saturating_sub(self.padding * 2),
         }
     }
 }
@@ -183,7 +204,7 @@ mod tests {
                     height,
                     ..Rect::default()
                 }) {
-                    let _ = rect.content();
+                    let _ = PaneLayout::default().content(rect);
                     assert!(rect.width <= width);
                     assert!(rect.height <= height);
                 }
