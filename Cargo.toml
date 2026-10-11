@@ -17,6 +17,9 @@ signal-hook = "0.3"
 vt100 = "0.16"
 rmux-core = { path = "crates/rmux-core" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.28", features = ["fs", "process", "signal"] }
+
 [lints.rust]
 unsafe_code = "forbid"
 

@@ -1,6 +1,10 @@
 #![cfg(target_os = "linux")]
 
 use rmux::adapters::pty::Pane;
+
+fn shell() -> String {
+    std::env::var("RMUX_TEST_SHELL").unwrap_or_else(|_| "/bin/sh".into())
+}
 use std::{
     path::Path,
     thread,
@@ -25,7 +29,7 @@ fn wait_for(pane: &mut Pane, predicate: impl Fn(&Pane) -> bool) {
 
 #[test]
 fn real_shell_resize_unicode_color_and_exit() {
-    let mut pane = Pane::spawn("/bin/sh", 24, 80).unwrap();
+    let mut pane = Pane::spawn(&shell(), 24, 80).unwrap();
     pane.resize(12, 50).unwrap();
     pane.write(concat!(r"stty -echo; stty size; printf '\033[31mPTY_'; printf 'READY\033[0m'; printf '\n\347\225\214\n'", "\r").as_bytes()).unwrap();
     wait_for(&mut pane, |pane| {
@@ -51,7 +55,7 @@ fn real_shell_resize_unicode_color_and_exit() {
 #[test]
 fn failed_spawn_and_drop_cleanup() {
     assert!(Pane::spawn("/this/executable/does/not/exist", 10, 30).is_err());
-    let pane = Pane::spawn("/bin/sh", 10, 30).unwrap();
+    let pane = Pane::spawn(&shell(), 10, 30).unwrap();
     let pid = pane.process_id().expect("Linux child PID");
     drop(pane);
     assert!(
@@ -62,7 +66,7 @@ fn failed_spawn_and_drop_cleanup() {
 
 #[test]
 fn input_backpressure_never_blocks_ui_thread() {
-    let mut pane = Pane::spawn("/bin/sh", 10, 30).unwrap();
+    let mut pane = Pane::spawn(&shell(), 10, 30).unwrap();
     pane.write(b"exec sleep 60\r").unwrap();
     thread::sleep(Duration::from_millis(100));
     let payload = vec![b'x'; 65_536];
@@ -80,4 +84,52 @@ fn input_backpressure_never_blocks_ui_thread() {
         "UI thread blocked on PTY write"
     );
     assert!(pane.write(&vec![b'x'; 65_537]).is_err());
+}
+
+#[test]
+fn tiny_pane_with_wide_unicode_does_not_panic() {
+    let mut pane = Pane::spawn(&shell(), 1, 1).unwrap();
+    assert_eq!(pane.screen().size(), (2, 2));
+    pane.resize(1, 0).unwrap();
+    pane.write(concat!(r"stty -echo; printf '\347\225\214'; sleep 1", "\r").as_bytes())
+        .unwrap();
+    wait_for(&mut pane, |pane| pane.screen().contents().contains('界'));
+}
+
+#[test]
+fn close_joins_workers_and_terminates_background_jobs() {
+    let mut pane = Pane::spawn(&shell(), 10, 60).unwrap();
+    pane.write(b"stty -echo; sleep 60 & printf 'JOB_%s_READY' $!\r")
+        .unwrap();
+    wait_for(&mut pane, |pane| {
+        pane.screen().contents().contains("_READY")
+    });
+    let text = pane.screen().contents();
+    let (_, rest) = text.rsplit_once("JOB_").unwrap();
+    let (job, _) = rest.split_once("_READY").unwrap();
+    let job: u32 = job.parse().unwrap();
+    let started = Instant::now();
+    drop(pane);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "worker join blocked"
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let stat = std::fs::read_to_string(format!("/proc/{job}/stat"));
+        if stat.is_err()
+            || stat
+                .unwrap()
+                .rsplit_once(')')
+                .unwrap()
+                .1
+                .split_whitespace()
+                .next()
+                == Some("Z")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "background job still running");
+        thread::sleep(Duration::from_millis(5));
+    }
 }

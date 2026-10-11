@@ -99,9 +99,22 @@ impl MetricsServer {
                         let _ = connection.set_read_timeout(timeout);
                         let _ = connection.set_write_timeout(timeout);
                         let mut buffer = [0; 1024];
-                        let Ok(count) = connection.read(&mut buffer) else { continue; };
-                        let request = &buffer[..count];
-                        let (status, body) = if request.starts_with(b"GET /metrics HTTP/1.") {
+                        let mut count = 0;
+                        let deadline = Instant::now() + Duration::from_millis(250);
+                        let mut complete = false;
+                        while count < buffer.len() && Instant::now() < deadline {
+                            let remaining = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(1));
+                            let _ = connection.set_read_timeout(Some(remaining));
+                            match connection.read(&mut buffer[count..]) {
+                                Ok(0) | Err(_) => break,
+                                Ok(received) => count += received,
+                            }
+                            if buffer[..count].windows(4).any(|window| window == b"\r\n\r\n") { complete = true; break; }
+                        }
+                        let line = buffer[..count].split(|byte| *byte == b'\n').next().unwrap_or_default();
+                        let (status, body) = if !complete {
+                            ("400 Bad Request", "incomplete or oversized request\n".into())
+                        } else if matches!(line, b"GET /metrics HTTP/1.1\r" | b"GET /metrics HTTP/1.0\r") {
                             ("200 OK", metrics.encode())
                         } else { ("404 Not Found", "not found\n".into()) };
                         let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());

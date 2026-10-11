@@ -129,11 +129,19 @@ fn run() -> Result<()> {
         String::from(" rmux | Ctrl-b ? help | % columns | \" rows | o focus | z zoom ");
     let mut dirty = true;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
+    let mut output_cursor = 0;
     let mut stdout = io::stdout().lock();
     while !app.host.panes.is_empty() && !stopped.load(Ordering::Relaxed) {
         let mut ended = Vec::new();
-        for (&id, pane) in &mut app.host.panes {
-            match pane.drain() {
+        let ids: Vec<_> = app.host.panes.keys().copied().collect();
+        let inspected = ids.len().min(16);
+        // At most 256 KiB per tick, rotating across panes instead of favoring low IDs.
+        for offset in 0..inspected {
+            let id = ids[(output_cursor + offset) % ids.len()];
+            let Some(pane) = app.host.panes.get_mut(&id) else {
+                continue;
+            };
+            match pane.drain_budget(4) {
                 Ok(bytes) => {
                     dirty |= bytes > 0;
                     metrics.pty_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
@@ -147,6 +155,7 @@ fn run() -> Result<()> {
                 ended.push(id);
             }
         }
+        output_cursor = (output_cursor + inspected) % ids.len().max(1);
         for id in ended {
             app.dispatch(Event::Close(id));
             dirty = true;
