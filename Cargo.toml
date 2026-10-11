@@ -1,0 +1,28 @@
+[package]
+name = "rmux"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "An attached terminal multiplexer with deterministic session transitions"
+
+[dependencies]
+anyhow = "1.0"
+crossterm = "0.29"
+nix = { version = "0.29", features = ["fs", "signal", "process"] }
+portable-pty = "0.9"
+vt100 = { package = "atuin-vt100", version = "0.19.1" }
+signal-hook = "0.3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.release]
+lto = "thin"
+
+[[bench]]
+name = "runtime"
+harness = false
