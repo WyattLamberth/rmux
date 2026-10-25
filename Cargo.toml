@@ -14,7 +14,7 @@ anyhow = "1"
 crossterm = "0.29"
 portable-pty = "0.9"
 signal-hook = "0.3"
-vt100 = "0.16"
+vt100 = "0.18"
 rmux-core = { path = "crates/rmux-core" }
 toml = "1.1.8"
 serde = { version = "1.0.229", features = ["derive"] }
